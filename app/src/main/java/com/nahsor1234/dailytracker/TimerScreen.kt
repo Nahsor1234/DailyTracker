@@ -244,6 +244,7 @@ private fun CustomDurationControl(value: String, enabled: Boolean, onValueChange
     val sliderValue = value.toFloatOrNull()?.coerceIn(1f, 599f) ?: 25f
     val interaction = remember { MutableInteractionSource() }
     val dragging by interaction.collectIsDraggedAsState()
+    val activeColor = MaterialTheme.colorScheme.primary
     Column(Modifier.fillMaxWidth()) {
         Text("Custom duration", style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Medium)
@@ -269,10 +270,10 @@ private fun CustomDurationControl(value: String, enabled: Boolean, onValueChange
                                     lineTo(x, cy + wave)
                                 }
                             }
-                            drawPath(path, MaterialTheme.colorScheme.primary,
+                            drawPath(path, activeColor,
                                 style = Stroke(5.dp.toPx(), cap = StrokeCap.Round))
                         } else {
-                            drawLine(MaterialTheme.colorScheme.primary, Offset(left, cy),
+                            drawLine(activeColor, Offset(left, cy),
                                 Offset(activeEnd, cy), 5.dp.toPx(), cap = StrokeCap.Round)
                         }
                     }
