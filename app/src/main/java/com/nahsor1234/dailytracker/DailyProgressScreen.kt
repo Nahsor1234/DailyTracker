@@ -1,48 +1,64 @@
 package com.nahsor1234.dailytracker
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateIntAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -52,7 +68,7 @@ import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.time.format.TextStyle
+import java.time.format.TextStyle as JavaTextStyle
 import java.time.temporal.WeekFields
 import java.util.Locale
 
@@ -149,76 +165,99 @@ internal fun DailyProgressScreen(
         DateTimeFormatter.ofPattern("EEEE, d MMMM yyyy", locale)
     }
 
+    val weekdayFormatter = remember(locale) { DateTimeFormatter.ofPattern("EEEE", locale) }
+    val dayFormatter = remember(locale) { DateTimeFormatter.ofPattern("d MMMM yyyy", locale) }
+    val todayFormatter = remember(locale) { DateTimeFormatter.ofPattern("EEE, d MMM", locale) }
+    val monthNameFormatter = remember(locale) { DateTimeFormatter.ofPattern("MMMM", locale) }
+    val primary = MaterialTheme.colorScheme.primary
+
     Surface(
         modifier = modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp)
+        Box(
+            Modifier.fillMaxSize().drawBehind {
+                // Static ambient glow in the top corner; the content scrolls over it.
+                val glowCenter = Offset(size.width * 0.85f, 0f)
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(primary.copy(alpha = 0.14f), Color.Transparent),
+                        center = glowCenter,
+                        radius = size.width * 0.95f
+                    ),
+                    radius = size.width * 0.95f,
+                    center = glowCenter
+                )
+            }
         ) {
-            Spacer(Modifier.height(24.dp))
-            Text(
-                text = "DailyTracker",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "Daily progress",
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.onBackground,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "A clear record of how each day went.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(22.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp)
+            ) {
+                Spacer(Modifier.height(28.dp))
+                ProgressHeader(
+                    todayLabel = today.format(todayFormatter).uppercase(locale),
+                    monthName = displayedMonth.format(monthNameFormatter),
+                    month = displayedMonth,
+                    completedDates = completedDates,
+                    today = today
+                )
+                Spacer(Modifier.height(22.dp))
 
-            MonthCalendar(
-                month = displayedMonth,
-                selectedDate = selectedDate,
-                today = today,
-                completedDates = completedDates,
-                locale = locale,
-                monthLabel = displayedMonth.format(monthFormatter),
-                onPreviousMonth = {
-                    val target = displayedMonth.minusMonths(1)
-                    displayedMonth = target
-                    selectedDate = target.atDay(
-                        selectedDate.dayOfMonth.coerceAtMost(target.lengthOfMonth())
-                    )
-                },
-                onNextMonth = {
-                    val target = displayedMonth.plusMonths(1)
-                    displayedMonth = target
-                    selectedDate = target.atDay(
-                        selectedDate.dayOfMonth.coerceAtMost(target.lengthOfMonth())
-                    )
-                },
-                onSelectDate = { selectedDate = it }
-            )
+                MonthCalendar(
+                    month = displayedMonth,
+                    selectedDate = selectedDate,
+                    today = today,
+                    completedDates = completedDates,
+                    locale = locale,
+                    onPreviousMonth = {
+                        val target = displayedMonth.minusMonths(1)
+                        displayedMonth = target
+                        selectedDate = target.atDay(
+                            selectedDate.dayOfMonth.coerceAtMost(target.lengthOfMonth())
+                        )
+                    },
+                    onNextMonth = {
+                        val target = displayedMonth.plusMonths(1)
+                        displayedMonth = target
+                        selectedDate = target.atDay(
+                            selectedDate.dayOfMonth.coerceAtMost(target.lengthOfMonth())
+                        )
+                    },
+                    onSelectDate = { selectedDate = it }
+                )
 
-            Spacer(Modifier.height(24.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Spacer(Modifier.height(28.dp))
                 Text(
                     text = "SELECTED DAY",
-                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.SemiBold
+                    style = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 2.sp)
                 )
-                Text(
-                    text = selectedDate.format(selectedDateFormatter),
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Spacer(Modifier.height(6.dp))
+                AnimatedContent(
+                    targetState = selectedDate,
+                    transitionSpec = {
+                        (slideInVertically(tween(260)) { it / 3 } + fadeIn(tween(220))) togetherWith
+                            (slideOutVertically(tween(200)) { -it / 3 } + fadeOut(tween(140)))
+                    },
+                    label = "selected-day-title"
+                ) { shown ->
+                    Column {
+                        Text(
+                            text = shown.format(weekdayFormatter),
+                            color = MaterialTheme.colorScheme.onBackground,
+                            style = TextStyle(fontSize = 32.sp, fontWeight = FontWeight.Light, letterSpacing = (-0.5).sp)
+                        )
+                        Text(
+                            text = shown.format(dayFormatter),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
                 Text(
                     text = when {
                         selectedDate.isBefore(today) -> "Past days are available for review only."
@@ -228,36 +267,140 @@ internal fun DailyProgressScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                Spacer(Modifier.height(16.dp))
+
+                Reveal(key = selectedDate to isLoading) {
+                    when {
+                        isLoading -> InfoPanel(
+                            title = "Loading day…",
+                            description = "Opening the saved record on this device."
+                        )
+                        loadFailed -> InfoPanel(
+                            title = "Couldn't load this day",
+                            description = "Your existing records have not been changed. Select the day again to retry."
+                        )
+                        selectedDate.isAfter(today) -> InfoPanel(
+                            title = "Not available yet",
+                            description = "Daily records can only be created or edited on the current local calendar date."
+                        )
+                        selectedDate.isBefore(today) -> PastDayPanel(entry = selectedEntry)
+                        else -> TodayEditor(
+                            entry = selectedEntry ?: DailyEntry(
+                                date = selectedDate,
+                                completed = false,
+                                description = ""
+                            ),
+                            saveState = saveState,
+                            onEntryChange = ::save
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(32.dp))
             }
+        }
+    }
+}
 
-            Spacer(Modifier.height(14.dp))
+// ---------------------------------------------------------------------------------------------
+// Shared building blocks
+// ---------------------------------------------------------------------------------------------
 
-            when {
-                isLoading -> InfoPanel(
-                    title = "Loading day…",
-                    description = "Opening the saved record on this device."
+private val CardShape = RoundedCornerShape(28.dp)
+private val HairlineColor = Color.White.copy(alpha = 0.08f)
+private val CardFill = Color.White.copy(alpha = 0.04f)
+
+private fun Modifier.glassCard(): Modifier =
+    this.fillMaxWidth()
+        .clip(CardShape)
+        .background(CardFill)
+        .border(1.dp, HairlineColor, CardShape)
+
+/** Fades and lifts its content in whenever [key] changes. */
+@Composable
+private fun Reveal(key: Any, content: @Composable () -> Unit) {
+    val progress = remember(key) { Animatable(0f) }
+    LaunchedEffect(key) { progress.animateTo(1f, tween(380, easing = FastOutSlowInEasing)) }
+    Box(
+        Modifier.graphicsLayer {
+            alpha = progress.value
+            translationY = (1f - progress.value) * 22.dp.toPx()
+        }
+    ) { content() }
+}
+
+@Composable
+private fun ProgressHeader(
+    todayLabel: String,
+    monthName: String,
+    month: YearMonth,
+    completedDates: Set<LocalDate>,
+    today: LocalDate
+) {
+    val scheme = MaterialTheme.colorScheme
+    val shownCount by animateIntAsState(completedDates.size, tween(700), label = "month-count")
+
+    Text(
+        text = todayLabel,
+        color = scheme.primary,
+        style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 2.4.sp)
+    )
+    Spacer(Modifier.height(6.dp))
+    Text(
+        text = "Progress",
+        color = scheme.onBackground,
+        style = TextStyle(fontSize = 40.sp, fontWeight = FontWeight.Light, letterSpacing = (-1).sp)
+    )
+    Spacer(Modifier.height(18.dp))
+    MonthStrip(month, completedDates, today)
+    Spacer(Modifier.height(10.dp))
+    Row(verticalAlignment = Alignment.Bottom) {
+        Text(
+            text = shownCount.toString(),
+            color = scheme.onBackground,
+            style = TextStyle(fontSize = 28.sp, fontWeight = FontWeight.Light, fontFeatureSettings = "tnum")
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "days completed in $monthName",
+            modifier = Modifier.padding(bottom = 5.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = scheme.onSurfaceVariant
+        )
+    }
+}
+
+/** One capsule per day of the month; completed days fill in with a left-to-right stagger. */
+@Composable
+private fun MonthStrip(month: YearMonth, completedDates: Set<LocalDate>, today: LocalDate) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        Modifier.fillMaxWidth().height(14.dp),
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        for (day in 1..month.lengthOfMonth()) {
+            key(day) {
+                val date = month.atDay(day)
+                val color by animateColorAsState(
+                    targetValue = when {
+                        date in completedDates -> scheme.primary
+                        date.isAfter(today) -> Color.White.copy(alpha = 0.05f)
+                        else -> Color.White.copy(alpha = 0.14f)
+                    },
+                    animationSpec = tween(350, delayMillis = day * 8),
+                    label = "strip-color"
                 )
-                loadFailed -> InfoPanel(
-                    title = "Couldn't load this day",
-                    description = "Your existing records have not been changed. Select the day again to retry."
+                val height by animateDpAsState(
+                    targetValue = if (date == today) 14.dp else 8.dp,
+                    animationSpec = tween(300),
+                    label = "strip-height"
                 )
-                selectedDate.isAfter(today) -> InfoPanel(
-                    title = "Not available yet",
-                    description = "Daily records can only be created or edited on the current local calendar date."
-                )
-                selectedDate.isBefore(today) -> PastDayPanel(entry = selectedEntry)
-                else -> TodayEditor(
-                    entry = selectedEntry ?: DailyEntry(
-                        date = selectedDate,
-                        completed = false,
-                        description = ""
-                    ),
-                    saveState = saveState,
-                    onEntryChange = ::save
+                Box(
+                    Modifier.weight(1f).height(height).clip(CircleShape).background(color)
                 )
             }
-
-            Spacer(Modifier.height(32.dp))
         }
     }
 }
@@ -269,7 +412,6 @@ private fun MonthCalendar(
     today: LocalDate,
     completedDates: Set<LocalDate>,
     locale: Locale,
-    monthLabel: String,
     onPreviousMonth: () -> Unit,
     onNextMonth: () -> Unit,
     onSelectDate: (LocalDate) -> Unit
@@ -278,97 +420,127 @@ private fun MonthCalendar(
     val weekdays = remember(locale) {
         (0..6).map { offset ->
             firstDayOfWeek.plus(offset.toLong())
-                .getDisplayName(TextStyle.NARROW_STANDALONE, locale)
+                .getDisplayName(JavaTextStyle.NARROW_STANDALONE, locale)
                 .uppercase(locale)
         }
     }
-    val calendarDays = remember(month, locale) {
-        buildCalendarDays(month, firstDayOfWeek)
-    }
+    val labelFormatter = remember(locale) { DateTimeFormatter.ofPattern("MMMM yyyy", locale) }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+    Column(Modifier.glassCard().padding(18.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            AnimatedContent(
+                targetState = month,
+                modifier = Modifier.weight(1f),
+                transitionSpec = {
+                    val direction = if (targetState > initialState) 1 else -1
+                    (slideInHorizontally(tween(320)) { it * direction / 3 } + fadeIn(tween(220))) togetherWith
+                        (slideOutHorizontally(tween(320)) { -it * direction / 3 } + fadeOut(tween(160)))
+                },
+                label = "month-label"
+            ) { shown ->
                 Text(
-                    text = monthLabel,
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.titleMedium,
+                    text = shown.format(labelFormatter),
                     color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.SemiBold
+                    style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Light)
                 )
-                TextButton(onClick = onPreviousMonth, modifier = Modifier.size(40.dp)) {
-                    Text("‹", fontSize = 27.sp, lineHeight = 27.sp)
-                }
-                TextButton(onClick = onNextMonth, modifier = Modifier.size(40.dp)) {
-                    Text("›", fontSize = 27.sp, lineHeight = 27.sp)
-                }
             }
+            NavChevron(forward = false, description = "Previous month", onClick = onPreviousMonth)
+            Spacer(Modifier.width(8.dp))
+            NavChevron(forward = true, description = "Next month", onClick = onNextMonth)
+        }
 
-            Spacer(Modifier.height(12.dp))
-            Row(modifier = Modifier.fillMaxWidth()) {
-                weekdays.forEach { day ->
-                    Text(
-                        text = day,
-                        modifier = Modifier.weight(1f),
-                        textAlign = TextAlign.Center,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
+        Spacer(Modifier.height(16.dp))
+        Row(Modifier.fillMaxWidth()) {
+            weekdays.forEach { day ->
+                Text(
+                    text = day,
+                    modifier = Modifier.weight(1f),
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Medium
+                )
             }
-            Spacer(Modifier.height(8.dp))
+        }
+        Spacer(Modifier.height(8.dp))
 
-            calendarDays.chunked(7).forEach { week ->
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    week.forEach { date ->
-                        if (date == null) {
-                            Spacer(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .aspectRatio(1f)
-                                    .padding(2.dp)
-                            )
-                        } else {
-                            CalendarDayCell(
-                                date = date,
-                                isToday = date == today,
-                                isSelected = date == selectedDate,
-                                isCompleted = date in completedDates,
-                                isFuture = date.isAfter(today),
-                                onClick = { onSelectDate(date) },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .aspectRatio(1f)
-                                    .padding(2.dp)
-                            )
+        AnimatedContent(
+            targetState = month,
+            transitionSpec = {
+                val direction = if (targetState > initialState) 1 else -1
+                (slideInHorizontally(tween(340)) { it * direction / 4 } + fadeIn(tween(240))) togetherWith
+                    (slideOutHorizontally(tween(340)) { -it * direction / 4 } + fadeOut(tween(160)))
+            },
+            label = "calendar-grid"
+        ) { shownMonth ->
+            val days = remember(shownMonth, locale) { buildCalendarDays(shownMonth, firstDayOfWeek) }
+            Column(Modifier.fillMaxWidth()) {
+                days.chunked(7).forEach { week ->
+                    Row(Modifier.fillMaxWidth()) {
+                        week.forEach { date ->
+                            if (date == null) {
+                                Spacer(Modifier.weight(1f).aspectRatio(1f).padding(2.dp))
+                            } else {
+                                CalendarDayCell(
+                                    date = date,
+                                    isToday = date == today,
+                                    isSelected = date == selectedDate,
+                                    isCompleted = date in completedDates,
+                                    isFuture = date.isAfter(today),
+                                    onClick = { onSelectDate(date) },
+                                    modifier = Modifier.weight(1f).aspectRatio(1f).padding(2.dp)
+                                )
+                            }
                         }
                     }
                 }
             }
+        }
 
-            Spacer(Modifier.height(14.dp))
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
-            Spacer(Modifier.height(12.dp))
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(20.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                LegendItem(MaterialTheme.colorScheme.primary, "Completed")
-                LegendItem(MaterialTheme.colorScheme.onSurface, "Today", outlined = true)
+        Spacer(Modifier.height(14.dp))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+        Spacer(Modifier.height(12.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            LegendItem(MaterialTheme.colorScheme.primary, "Completed")
+            LegendItem(MaterialTheme.colorScheme.onSurface, "Today", outlined = true)
+        }
+    }
+}
+
+@Composable
+private fun NavChevron(forward: Boolean, description: String, onClick: () -> Unit) {
+    val tint = MaterialTheme.colorScheme.onSurfaceVariant
+    Box(
+        Modifier.size(40.dp).clip(CircleShape)
+            .border(1.dp, Color.White.copy(alpha = 0.12f), CircleShape)
+            .clickable(onClick = onClick)
+            .semantics {
+                contentDescription = description
+                role = Role.Button
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(Modifier.size(16.dp)) {
+            val w = size.width
+            val h = size.height
+            val path = Path().apply {
+                if (forward) {
+                    moveTo(w * 0.38f, h * 0.15f)
+                    lineTo(w * 0.70f, h * 0.50f)
+                    lineTo(w * 0.38f, h * 0.85f)
+                } else {
+                    moveTo(w * 0.62f, h * 0.15f)
+                    lineTo(w * 0.30f, h * 0.50f)
+                    lineTo(w * 0.62f, h * 0.85f)
+                }
             }
+            drawPath(
+                path, tint,
+                style = Stroke(2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+            )
         }
     }
 }
@@ -384,36 +556,54 @@ private fun CalendarDayCell(
     modifier: Modifier = Modifier
 ) {
     val scheme = MaterialTheme.colorScheme
-    val backgroundColor by animateColorAsState(
-        targetValue = if (isSelected) scheme.primary else Color.Transparent,
-        animationSpec = tween(durationMillis = 160),
-        label = "calendar-day-background"
+    val scale by animateFloatAsState(
+        targetValue = if (isSelected) 1f else 0.9f,
+        animationSpec = spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium),
+        label = "day-scale"
     )
-    val textColor = when {
-        isSelected -> scheme.onPrimary
-        isFuture -> scheme.onSurfaceVariant.copy(alpha = 0.45f)
-        else -> scheme.onSurface
-    }
-    val markerColor = when {
-        isSelected && isCompleted -> scheme.onPrimary
-        isCompleted -> scheme.primary
-        else -> Color.Transparent
-    }
+    val fill by animateColorAsState(
+        targetValue = when {
+            isSelected -> scheme.primary
+            isCompleted -> scheme.primary.copy(alpha = 0.16f)
+            else -> Color.Transparent
+        },
+        animationSpec = tween(220),
+        label = "day-fill"
+    )
+    val textColor by animateColorAsState(
+        targetValue = when {
+            isSelected -> scheme.onPrimary
+            isFuture -> scheme.onSurfaceVariant.copy(alpha = 0.4f)
+            else -> scheme.onSurface
+        },
+        animationSpec = tween(200),
+        label = "day-text"
+    )
+    val markerColor by animateColorAsState(
+        targetValue = when {
+            isSelected && isCompleted -> scheme.onPrimary
+            isCompleted -> scheme.primary
+            else -> Color.Transparent
+        },
+        animationSpec = tween(250),
+        label = "day-marker"
+    )
+    val ringAlpha by animateFloatAsState(
+        targetValue = if (isToday && !isSelected) 1f else 0f,
+        animationSpec = tween(200),
+        label = "day-ring"
+    )
 
-    Box(
-        modifier = modifier
-            .clip(CircleShape)
-            .background(backgroundColor)
-            .then(
-                if (isToday && !isSelected) {
-                    Modifier.border(1.dp, scheme.primary, CircleShape)
-                } else {
-                    Modifier
+    Box(modifier, contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.fillMaxSize()
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
                 }
-            )
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
+                .background(fill, CircleShape)
+                .border(1.dp, scheme.primary.copy(alpha = ringAlpha), CircleShape)
+        )
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
@@ -425,13 +615,10 @@ private fun CalendarDayCell(
                 fontWeight = if (isToday || isSelected) FontWeight.SemiBold else FontWeight.Normal
             )
             Spacer(
-                modifier = Modifier
-                    .padding(top = 2.dp)
-                    .size(4.dp)
-                    .clip(CircleShape)
-                    .background(markerColor)
+                Modifier.padding(top = 2.dp).size(4.dp).clip(CircleShape).background(markerColor)
             )
         }
+        Box(Modifier.matchParentSize().clip(CircleShape).clickable(onClick = onClick))
     }
 }
 
@@ -461,155 +648,310 @@ private fun LegendItem(
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Day panels
+// ---------------------------------------------------------------------------------------------
+
 @Composable
 private fun TodayEditor(
     entry: DailyEntry,
     saveState: SaveState,
     onEntryChange: (DailyEntry) -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .animateContentSize()
-            .padding(16.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(
-                checked = entry.completed,
-                onCheckedChange = { onEntryChange(entry.copy(completed = it)) }
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = "I've completed my day.",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.Medium
-            )
-        }
+    Column(Modifier.glassCard().animateContentSize().padding(18.dp)) {
+        CompletionToggle(
+            completed = entry.completed,
+            onChange = { onEntryChange(entry.copy(completed = it)) }
+        )
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(14.dp))
         Text(
             text = "DAILY DESCRIPTION",
-            style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.SemiBold
+            style = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 2.sp)
         )
         Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
+        DescriptionField(
             value = entry.description,
-            onValueChange = { value ->
-                if (value.length <= MAX_DESCRIPTION_LENGTH) {
-                    onEntryChange(entry.copy(description = value))
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            minLines = 5,
-            maxLines = 8,
-            label = { Text("What did you do today?") },
-            placeholder = { Text("Write a short record of your day…") },
-            supportingText = {
-                Text(
-                    text = "${entry.description.length} / $MAX_DESCRIPTION_LENGTH",
-                    modifier = Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.End
-                )
-            },
-            shape = RoundedCornerShape(16.dp)
+            onValueChange = { onEntryChange(entry.copy(description = it)) }
         )
 
-        Spacer(Modifier.height(10.dp))
-        val statusText = when (saveState) {
-            SaveState.IDLE -> "Changes save automatically on this device."
-            SaveState.SAVING -> "Saving on this device…"
-            SaveState.SAVED -> "Saved on this device."
-            SaveState.FAILED -> "Couldn't save. Your text is still shown; edit again to retry."
-        }
-        val statusColor = if (saveState == SaveState.FAILED) {
-            MaterialTheme.colorScheme.error
-        } else {
-            MaterialTheme.colorScheme.onSurfaceVariant
-        }
-        Text(
-            text = statusText,
-            style = MaterialTheme.typography.bodySmall,
-            color = statusColor
-        )
+        Spacer(Modifier.height(14.dp))
+        SaveIndicator(saveState)
+        Spacer(Modifier.height(2.dp))
         Text(
             text = "Cloud sync is not configured yet.",
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
         )
+    }
+}
+
+/** Large circular toggle: ring fills, the check mark draws itself, and a small burst fires on completion. */
+@Composable
+private fun CompletionToggle(completed: Boolean, onChange: (Boolean) -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val check = remember { Animatable(if (completed) 1f else 0f) }
+    val burst = remember { Animatable(1f) } // 1f = finished, nothing visible
+    var previous by remember { mutableStateOf(completed) }
+
+    LaunchedEffect(completed) {
+        check.animateTo(if (completed) 1f else 0f, tween(if (completed) 380 else 200))
+    }
+    LaunchedEffect(completed) {
+        if (completed && !previous) {
+            burst.snapTo(0f)
+            burst.animateTo(1f, tween(750, easing = FastOutSlowInEasing))
+        }
+        previous = completed
+    }
+
+    Row(
+        Modifier.fillMaxWidth()
+            .toggleable(value = completed, role = Role.Checkbox, onValueChange = onChange),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(64.dp)) {
+            Canvas(Modifier.fillMaxSize()) {
+                val c = center
+                val r = 21.dp.toPx()
+                val fillAmount = check.value
+
+                drawCircle(Color.White.copy(alpha = 0.16f), r, c, style = Stroke(1.5.dp.toPx()))
+                if (fillAmount > 0f) drawCircle(scheme.primary, r * fillAmount, c)
+
+                val t = ((fillAmount - 0.35f) / 0.65f).coerceIn(0f, 1f)
+                if (t > 0f) {
+                    val tick = Path().apply {
+                        moveTo(c.x - 8.dp.toPx(), c.y + 0.5.dp.toPx())
+                        lineTo(c.x - 2.5.dp.toPx(), c.y + 6.dp.toPx())
+                        lineTo(c.x + 8.5.dp.toPx(), c.y - 6.dp.toPx())
+                    }
+                    val measure = PathMeasure()
+                    measure.setPath(tick, false)
+                    val partial = Path()
+                    measure.getSegment(0f, measure.length * t, partial, true)
+                    drawPath(
+                        partial, scheme.onPrimary,
+                        style = Stroke(2.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    )
+                }
+
+                val b = burst.value
+                if (b < 1f) {
+                    val fade = 1f - b
+                    drawCircle(
+                        scheme.primary.copy(alpha = 0.55f * fade),
+                        r + 14.dp.toPx() * b, c, style = Stroke(2.dp.toPx())
+                    )
+                    for (i in 0 until 10) {
+                        val angle = Math.toRadians(i * 36.0 + 18.0)
+                        val dist = r + 4.dp.toPx() + 14.dp.toPx() * b
+                        drawCircle(
+                            scheme.primary.copy(alpha = fade),
+                            2.4.dp.toPx() * fade,
+                            Offset(
+                                c.x + kotlin.math.cos(angle).toFloat() * dist,
+                                c.y + kotlin.math.sin(angle).toFloat() * dist
+                            )
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        Column {
+            Crossfade(targetState = completed, animationSpec = tween(200), label = "toggle-title") { done ->
+                Text(
+                    text = if (done) "Day complete" else "Mark today complete",
+                    color = scheme.onSurface,
+                    style = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.Medium)
+                )
+            }
+            Text(
+                text = "Tap to toggle",
+                style = MaterialTheme.typography.bodySmall,
+                color = scheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun DescriptionField(value: String, onValueChange: (String) -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(18.dp)
+    val borderColor by animateColorAsState(
+        targetValue = if (focused) scheme.primary else Color.White.copy(alpha = 0.12f),
+        animationSpec = tween(220),
+        label = "field-border"
+    )
+    val nearLimit = value.length > MAX_DESCRIPTION_LENGTH * 9 / 10
+    val counterColor by animateColorAsState(
+        targetValue = if (nearLimit) scheme.error else scheme.onSurfaceVariant,
+        animationSpec = tween(200),
+        label = "counter-color"
+    )
+
+    Column {
+        Box(
+            Modifier.fillMaxWidth().heightIn(min = 128.dp)
+                .clip(shape)
+                .background(Color.Black.copy(alpha = 0.18f))
+                .border(1.dp, borderColor, shape)
+                .padding(14.dp)
+        ) {
+            BasicTextField(
+                value = value,
+                onValueChange = { if (it.length <= MAX_DESCRIPTION_LENGTH) onValueChange(it) },
+                modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused },
+                textStyle = TextStyle(color = scheme.onSurface, fontSize = 15.sp, lineHeight = 22.sp),
+                cursorBrush = SolidColor(scheme.primary),
+                decorationBox = { inner ->
+                    Box {
+                        if (value.isEmpty()) {
+                            Text(
+                                "Write a short record of your day…",
+                                color = scheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                style = TextStyle(fontSize = 15.sp, lineHeight = 22.sp)
+                            )
+                        }
+                        inner()
+                    }
+                }
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "${value.length} / $MAX_DESCRIPTION_LENGTH",
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = TextAlign.End,
+            color = counterColor,
+            style = MaterialTheme.typography.labelSmall
+        )
+    }
+}
+
+@Composable
+private fun SaveIndicator(saveState: SaveState) {
+    val scheme = MaterialTheme.colorScheme
+    val pulse by rememberInfiniteTransition(label = "save-pulse").animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse),
+        label = "save-pulse-value"
+    )
+    val dotColor by animateColorAsState(
+        targetValue = when (saveState) {
+            SaveState.IDLE -> scheme.onSurfaceVariant.copy(alpha = 0.5f)
+            SaveState.SAVING, SaveState.SAVED -> scheme.primary
+            SaveState.FAILED -> scheme.error
+        },
+        animationSpec = tween(250),
+        label = "save-dot"
+    )
+    val statusText = when (saveState) {
+        SaveState.IDLE -> "Changes save automatically on this device."
+        SaveState.SAVING -> "Saving on this device…"
+        SaveState.SAVED -> "Saved on this device."
+        SaveState.FAILED -> "Couldn't save. Your text is still shown; edit again to retry."
+    }
+    val statusColor = if (saveState == SaveState.FAILED) scheme.error else scheme.onSurfaceVariant
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.size(8.dp)
+                .graphicsLayer { alpha = if (saveState == SaveState.SAVING) pulse else 1f }
+                .background(dotColor, CircleShape)
+        )
+        Spacer(Modifier.width(8.dp))
+        Crossfade(targetState = statusText, animationSpec = tween(180), label = "save-text") { text ->
+            Text(text, style = MaterialTheme.typography.bodySmall, color = statusColor)
+        }
     }
 }
 
 @Composable
 private fun PastDayPanel(entry: DailyEntry?) {
+    val scheme = MaterialTheme.colorScheme
+    val completed = entry?.completed == true
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        Modifier.glassCard().padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            CheckBadge(completed)
+            Spacer(Modifier.width(10.dp))
             Text(
-                text = if (entry?.completed == true) "Completed" else "Not marked complete",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.Medium
+                text = if (completed) "Completed" else "Not marked complete",
+                color = scheme.onSurface,
+                style = TextStyle(fontSize = 17.sp, fontWeight = FontWeight.Medium)
             )
             Spacer(Modifier.weight(1f))
             Text(
                 text = "READ ONLY",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                modifier = Modifier
+                    .border(1.dp, Color.White.copy(alpha = 0.14f), CircleShape)
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                color = scheme.onSurfaceVariant,
+                style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.Medium, letterSpacing = 1.5.sp)
             )
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
+        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
         Text(
             text = entry?.description?.takeIf(String::isNotBlank)
                 ?: "No description was saved for this day.",
             style = MaterialTheme.typography.bodyMedium,
-            color = if (entry?.description.isNullOrBlank()) {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            } else {
-                MaterialTheme.colorScheme.onSurface
-            }
+            color = if (entry?.description.isNullOrBlank()) scheme.onSurfaceVariant else scheme.onSurface
         )
         Text(
             text = "Past records cannot be edited.",
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = scheme.onSurfaceVariant
         )
     }
 }
 
 @Composable
-private fun InfoPanel(title: String, description: String) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surface
-    ) {
-        Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.SemiBold
+private fun CheckBadge(completed: Boolean) {
+    val scheme = MaterialTheme.colorScheme
+    Canvas(Modifier.size(28.dp)) {
+        val c = center
+        val r = size.minDimension / 2f - 1.dp.toPx()
+        if (completed) {
+            drawCircle(scheme.primary, r, c)
+            val tick = Path().apply {
+                moveTo(c.x - 5.dp.toPx(), c.y + 0.3.dp.toPx())
+                lineTo(c.x - 1.5.dp.toPx(), c.y + 4.dp.toPx())
+                lineTo(c.x + 5.5.dp.toPx(), c.y - 4.dp.toPx())
+            }
+            drawPath(
+                tick, scheme.onPrimary,
+                style = Stroke(2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
             )
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+        } else {
+            drawCircle(Color.White.copy(alpha = 0.18f), r, c, style = Stroke(1.5.dp.toPx()))
         }
+    }
+}
+
+@Composable
+private fun InfoPanel(title: String, description: String) {
+    Column(
+        Modifier.glassCard().padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            text = title,
+            color = MaterialTheme.colorScheme.onSurface,
+            style = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Medium)
+        )
+        Text(
+            text = description,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
