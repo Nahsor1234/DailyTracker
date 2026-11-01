@@ -98,6 +98,11 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate) 
     val colors = MaterialTheme.colorScheme
 
     Box(Modifier.fillMaxSize().background(colors.background)) {
+        // Pre-composes the Timer screen off-screen so the first Progress -> Timer slide is smooth.
+        TimerScreenWarmUp(
+            enabled = destination == TrackerDestination.PROGRESS,
+            modifier = Modifier.fillMaxSize().statusBarsPadding()
+        )
         AnimatedContent(
             targetState = destination,
             modifier = Modifier.fillMaxSize().statusBarsPadding(),
