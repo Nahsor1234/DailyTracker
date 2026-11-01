@@ -2,7 +2,6 @@ package com.nahsor1234.dailytracker
 
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
-import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.media.RingtoneManager
