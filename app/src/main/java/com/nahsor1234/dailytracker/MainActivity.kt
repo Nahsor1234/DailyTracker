@@ -13,6 +13,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -38,7 +39,6 @@ import androidx.core.view.WindowInsetsControllerCompat
 import java.time.LocalDate
 import java.time.ZoneId
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 
 private enum class TrackerDestination { PROGRESS, TIMER }
@@ -119,32 +119,33 @@ private fun FloatingNavigationBar(
     onSelect: (TrackerDestination) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Surface(
-        modifier = modifier.width(264.dp).height(64.dp),
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shadowElevation = 14.dp
+    // No platform shadow (shadowElevation): on a near-black background it renders as a dark halo
+    // that reads as a rectangle behind the pill. A translucent fill + hairline border floats cleanly.
+    BoxWithConstraints(
+        modifier.width(248.dp).height(60.dp)
+            .clip(CircleShape)
+            .background(Color(0xE61A241D))
+            .border(1.dp, Color.White.copy(alpha = 0.10f), CircleShape)
+            .padding(5.dp)
     ) {
-        BoxWithConstraints(Modifier.fillMaxSize().padding(6.dp)) {
-            val selectedIndex = if (selected == TrackerDestination.PROGRESS) 0 else 1
-            val itemWidth = maxWidth / 2
-            val pillOffset by androidx.compose.animation.core.animateDpAsState(
-                targetValue = itemWidth * selectedIndex,
-                animationSpec = tween(320),
-                label = "navigation-pill"
-            )
-            Box(
-                Modifier.offset(x = pillOffset).width(itemWidth).fillMaxHeight()
-                    .clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer)
-            )
-            Row(Modifier.fillMaxSize()) {
-                NavigationItem("Progress", TrackerDestination.PROGRESS,
-                    selected == TrackerDestination.PROGRESS,
-                    { onSelect(TrackerDestination.PROGRESS) }, Modifier.weight(1f))
-                NavigationItem("Timer", TrackerDestination.TIMER,
-                    selected == TrackerDestination.TIMER,
-                    { onSelect(TrackerDestination.TIMER) }, Modifier.weight(1f))
-            }
+        val selectedIndex = if (selected == TrackerDestination.PROGRESS) 0 else 1
+        val itemWidth = maxWidth / 2
+        val pillOffset by androidx.compose.animation.core.animateDpAsState(
+            targetValue = itemWidth * selectedIndex,
+            animationSpec = tween(320),
+            label = "navigation-pill"
+        )
+        Box(
+            Modifier.offset(x = pillOffset).width(itemWidth).fillMaxHeight()
+                .clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
+        )
+        Row(Modifier.fillMaxSize()) {
+            NavigationItem("Progress", TrackerDestination.PROGRESS,
+                selected == TrackerDestination.PROGRESS,
+                { onSelect(TrackerDestination.PROGRESS) }, Modifier.weight(1f))
+            NavigationItem("Timer", TrackerDestination.TIMER,
+                selected == TrackerDestination.TIMER,
+                { onSelect(TrackerDestination.TIMER) }, Modifier.weight(1f))
         }
     }
 }
@@ -159,7 +160,7 @@ private fun NavigationItem(
 ) {
     val colors = MaterialTheme.colorScheme
     val foreground by animateColorAsState(
-        if (isSelected) colors.onPrimaryContainer else colors.onSurfaceVariant,
+        if (isSelected) colors.primary else colors.onSurfaceVariant,
         tween(200), label = "nav-content"
     )
     Row(
