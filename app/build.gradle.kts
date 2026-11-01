@@ -13,7 +13,7 @@ android {
         minSdk = 26
         targetSdk = 35 // Revisit against current Google Play requirements at release
         versionCode = 7
-        versionName = "1.6"
+        versionName = "1.6"\n\n        buildConfigField("String", "SUPABASE_URL", "\\\"https://clirtdxtqtiatuqkitmy.supabase.co\\\"")\n        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\\\"sb_publishable_VjQYGoJjFoAQXHSGwOohtQ_XL1XWIjU\\\"")
     }
 
     buildTypes {
