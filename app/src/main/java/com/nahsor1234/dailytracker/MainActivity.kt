@@ -136,6 +136,7 @@ private fun DailyTrackerApp(
     var showAccount by rememberSaveable { mutableStateOf(false) }
     var cloudAccountId by remember { mutableStateOf<String?>(null) }
     var cloudSyncStatus by rememberSaveable { mutableStateOf("") }
+    var cloudDataRevision by remember { mutableIntStateOf(0) }
     var syncInProgress by remember { mutableStateOf(false) }
     var passwordRecoveryPending by remember { mutableStateOf(false) }
     val syncWorker = remember(cloud) {
@@ -145,6 +146,16 @@ private fun DailyTrackerApp(
     }
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val focusManager = LocalFocusManager.current
+
+    fun handleCloudSyncResult(result: Result<Int>) {
+        result.onSuccess {
+            cloudDataRevision += 1
+            cloudSyncStatus = "Synced " + it + " daily records."
+        }.onFailure {
+            cloudAccountId = null
+            cloudSyncStatus = "Sync failed: " + (it.message ?: "Unknown error.")
+        }
+    }
 
     fun startCloudSync(account: DailyTrackerCloud.Account) {
         if (!account.verified) {
@@ -158,13 +169,7 @@ private fun DailyTrackerApp(
         cloudSyncStatus = "Syncing daily history..."
         repository.syncCloud(cloud, account.id) { result ->
             syncInProgress = false
-            cloudSyncStatus = result.fold(
-                { "Synced " + it + " daily records." },
-                {
-                    cloudAccountId = null
-                    "Sync failed: " + (it.message ?: "Unknown error.")
-                }
-            )
+            handleCloudSyncResult(result)
         }
     }
 
@@ -266,12 +271,8 @@ private fun DailyTrackerApp(
                             today = today,
                             cloud = cloud,
                             cloudAccountId = cloudAccountId,
-                            onCloudSyncResult = { result ->
-                                cloudSyncStatus = result.fold(
-                                    { "Synced " + it + " daily records." },
-                                    { "Sync failed: " + (it.message ?: "Unknown error.") }
-                                )
-                            }
+                            cloudDataRevision = cloudDataRevision,
+                            onCloudSyncResult = ::handleCloudSyncResult
                         )
                         TrackerDestination.TIMER -> TimerScreen()
                     }
