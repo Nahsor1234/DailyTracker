@@ -133,6 +133,14 @@ internal class DailyEntryRepository(context: Context) {
                     "This device's local history is linked to a different account. No records were synced."
                 }
 
+                if (existingOwner == null) {
+                    // Persist the account binding before any cloud write so a process death
+                    // cannot leave uploaded local history unassociated with its owner.
+                    check(binding.edit().putString(CLOUD_OWNER_KEY, accountId).commit()) {
+                        "The local account association could not be saved."
+                    }
+                }
+
                 val localEntries = readAllCloudEntries()
                 val mergedEntries = cloud.sync(localEntries)
                 val localByDate = localEntries.associateBy { it.date }
@@ -164,11 +172,6 @@ internal class DailyEntryRepository(context: Context) {
                     writable.endTransaction()
                 }
 
-                if (existingOwner == null) {
-                    check(binding.edit().putString(CLOUD_OWNER_KEY, accountId).commit()) {
-                        "The local account association could not be saved."
-                    }
-                }
                 mergedEntries.size
             }
             mainHandler.post { onResult(result) }
