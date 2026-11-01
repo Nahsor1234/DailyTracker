@@ -125,13 +125,26 @@ private fun FloatingNavigationBar(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shadowElevation = 14.dp
     ) {
-        Row(Modifier.fillMaxSize().padding(6.dp)) {
-            NavigationItem("Progress", TrackerDestination.PROGRESS,
-                selected == TrackerDestination.PROGRESS,
-                { onSelect(TrackerDestination.PROGRESS) }, Modifier.weight(1f))
-            NavigationItem("Timer", TrackerDestination.TIMER,
-                selected == TrackerDestination.TIMER,
-                { onSelect(TrackerDestination.TIMER) }, Modifier.weight(1f))
+        BoxWithConstraints(Modifier.fillMaxSize().padding(6.dp)) {
+            val selectedIndex = if (selected == TrackerDestination.PROGRESS) 0 else 1
+            val itemWidth = maxWidth / 2
+            val pillOffset by androidx.compose.animation.core.animateDpAsState(
+                targetValue = itemWidth * selectedIndex,
+                animationSpec = tween(320),
+                label = "navigation-pill"
+            )
+            Box(
+                Modifier.offset(x = pillOffset).width(itemWidth).fillMaxHeight()
+                    .clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer)
+            )
+            Row(Modifier.fillMaxSize()) {
+                NavigationItem("Progress", TrackerDestination.PROGRESS,
+                    selected == TrackerDestination.PROGRESS,
+                    { onSelect(TrackerDestination.PROGRESS) }, Modifier.weight(1f))
+                NavigationItem("Timer", TrackerDestination.TIMER,
+                    selected == TrackerDestination.TIMER,
+                    { onSelect(TrackerDestination.TIMER) }, Modifier.weight(1f))
+            }
         }
     }
 }
