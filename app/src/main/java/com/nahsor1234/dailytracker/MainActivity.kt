@@ -65,6 +65,7 @@ import java.time.ZoneId
 import java.util.concurrent.Executors
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 
 private enum class TrackerDestination { PROGRESS, TIMER }
 
@@ -109,7 +110,7 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate, 
     val colors = MaterialTheme.colorScheme
     var showReminders by rememberSaveable { mutableStateOf(false) }
     var showAccount by rememberSaveable { mutableStateOf(false) }
-    var cloudAccountId by rememberSaveable { mutableStateOf<String?>(null) }
+    var cloudAccountId by remember { mutableStateOf<String?>(null) }
     var cloudSyncStatus by rememberSaveable { mutableStateOf("") }
     var syncInProgress by remember { mutableStateOf(false) }
     val syncWorker = remember(cloud) {
