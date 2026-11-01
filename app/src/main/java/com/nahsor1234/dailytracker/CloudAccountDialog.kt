@@ -103,6 +103,9 @@ internal fun CloudAccountDialog(
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier.fillMaxWidth()
                     )
+                    if (syncStatus.isNotBlank()) {
+                        Text(syncStatus, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     OutlinedTextField(
                         value = confirmNewPassword,
                         onValueChange = { confirmNewPassword = it },
