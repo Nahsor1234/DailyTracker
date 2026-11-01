@@ -297,7 +297,7 @@ internal fun DailyProgressScreen(
                     }
                 }
 
-                Spacer(Modifier.height(32.dp))
+                Spacer(Modifier.navigationBarsPadding().height(120.dp))
             }
         }
     }
