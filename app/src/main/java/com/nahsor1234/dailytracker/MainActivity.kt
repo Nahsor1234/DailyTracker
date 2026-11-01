@@ -19,6 +19,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -91,7 +93,11 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate) 
     var destination by rememberSaveable { mutableStateOf(TrackerDestination.PROGRESS) }
     val stateHolder = rememberSaveableStateHolder()
     val colors = MaterialTheme.colorScheme
+    var showReminders by rememberSaveable { mutableStateOf(false) }
 
+    if (showReminders) {
+        ReminderScreen(onBack = { showReminders = false })
+    } else {
     Box(Modifier.fillMaxSize().background(colors.background)) {
         // Pre-composes the Timer screen off-screen so the first Progress -> Timer slide is smooth.
         TimerScreenWarmUp(
@@ -134,6 +140,42 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate) 
             modifier = Modifier.align(Alignment.BottomCenter)
                 .navigationBarsPadding().padding(bottom = 10.dp)
         )
+        ReminderEntryButton(
+            onClick = { showReminders = true },
+            modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding()
+                .padding(top = 12.dp, end = 16.dp)
+        )
+    }
+    }
+}
+
+@Composable
+private fun ReminderEntryButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val tint = MaterialTheme.colorScheme.onSurface
+    Box(
+        modifier.size(44.dp).clip(CircleShape)
+            .background(Color.White.copy(alpha = 0.045f))
+            .border(1.dp, Color.White.copy(alpha = 0.09f), CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(Modifier.size(21.dp)) {
+            val stroke = Stroke(width = 1.7.dp.toPx(), cap = StrokeCap.Round)
+            drawArc(
+                color = tint,
+                startAngle = 205f,
+                sweepAngle = 130f,
+                useCenter = false,
+                topLeft = Offset(size.width * 0.18f, size.height * 0.12f),
+                size = Size(size.width * 0.64f, size.height * 0.72f),
+                style = stroke
+            )
+            drawLine(tint, Offset(size.width * 0.18f, size.height * 0.68f),
+                Offset(size.width * 0.82f, size.height * 0.68f), stroke.width, cap = StrokeCap.Round)
+            drawLine(tint, Offset(size.width * 0.40f, size.height * 0.86f),
+                Offset(size.width * 0.60f, size.height * 0.86f), stroke.width, cap = StrokeCap.Round)
+            drawCircle(tint, 1.2.dp.toPx(), Offset(size.width / 2f, size.height * 0.92f))
+        }
     }
 }
 
