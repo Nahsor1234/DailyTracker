@@ -13,17 +13,12 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -164,34 +159,11 @@ private fun FloatingNavigationBar(
         position.animateTo(selectedIndex.toFloat(), spring(dampingRatio = 0.62f, stiffness = 320f))
     }
 
-    // A single highlight that travels slowly along the border. Read only in the draw phase.
-    val shimmer = rememberInfiniteTransition(label = "nav-shimmer").animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(4200, easing = LinearEasing)),
-        label = "nav-shimmer-x"
-    )
-
     Box(
         modifier.width(260.dp).height(62.dp)
             .graphicsLayer {
                 alpha = entrance.value
                 translationY = (1f - entrance.value) * 36.dp.toPx()
-            }
-            .drawBehind {
-                // Soft glow under the active tab. It replaces the platform shadow and follows the indicator.
-                val cx = 5.dp.toPx() + itemWidth.toPx() * (position.value + 0.5f)
-                val glowCenter = Offset(cx, size.height * 0.92f)
-                val glowRadius = size.width * 0.42f
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(scheme.primary.copy(alpha = 0.22f), Color.Transparent),
-                        center = glowCenter,
-                        radius = glowRadius
-                    ),
-                    radius = glowRadius,
-                    center = glowCenter
-                )
             }
     ) {
         Box(
@@ -206,20 +178,6 @@ private fun FloatingNavigationBar(
                     val corner = CornerRadius(size.height / 2f)
                     drawRoundRect(
                         color = Color.White.copy(alpha = 0.10f),
-                        cornerRadius = corner,
-                        style = Stroke(stroke)
-                    )
-                    val x = -120.dp.toPx() + (size.width + 240.dp.toPx()) * shimmer.value
-                    drawRoundRect(
-                        brush = Brush.horizontalGradient(
-                            colors = listOf(
-                                Color.Transparent,
-                                scheme.primary.copy(alpha = 0.7f),
-                                Color.Transparent
-                            ),
-                            startX = x - 90.dp.toPx(),
-                            endX = x + 90.dp.toPx()
-                        ),
                         cornerRadius = corner,
                         style = Stroke(stroke)
                     )
