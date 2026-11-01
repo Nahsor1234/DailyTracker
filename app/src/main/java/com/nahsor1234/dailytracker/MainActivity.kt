@@ -7,6 +7,8 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -97,9 +99,27 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate) 
     val colors = MaterialTheme.colorScheme
     var showReminders by rememberSaveable { mutableStateOf(false) }
 
-    if (showReminders) {
-        ReminderScreen(onBack = { showReminders = false })
-    } else {
+    AnimatedContent(
+        targetState = showReminders,
+        modifier = Modifier.fillMaxSize(),
+        transitionSpec = {
+            if (targetState) {
+                (scaleIn(initialScale = 0.94f, animationSpec = tween(260, easing = FastOutSlowInEasing)) +
+                    fadeIn(tween(180))) togetherWith
+                    (scaleOut(targetScale = 1.02f, animationSpec = tween(260, easing = FastOutSlowInEasing)) +
+                        fadeOut(tween(180)))
+            } else {
+                (scaleIn(initialScale = 1.02f, animationSpec = tween(260, easing = FastOutSlowInEasing)) +
+                    fadeIn(tween(180))) togetherWith
+                    (scaleOut(targetScale = 0.94f, animationSpec = tween(260, easing = FastOutSlowInEasing)) +
+                        fadeOut(tween(180)))
+            }
+        },
+        label = "reminders-zoom"
+    ) { remindersVisible ->
+        if (remindersVisible) {
+            ReminderScreen(onBack = { showReminders = false })
+        } else {
     Box(Modifier.fillMaxSize().background(colors.background)) {
         // Pre-composes the Timer screen off-screen so the first Progress -> Timer slide is smooth.
         TimerScreenWarmUp(
@@ -148,6 +168,7 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate) 
                 .padding(top = 12.dp, end = 16.dp)
         )
     }
+        }
     }
 }
 
