@@ -7,28 +7,24 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
 private val DailyTrackerColors = darkColorScheme(
-    primary = Color(0xFFB5D3A9),
-    onPrimary = Color(0xFF20301D),
-    primaryContainer = Color(0xFF354A31),
-    onPrimaryContainer = Color(0xFFD8EAD0),
-    secondary = Color(0xFFC2CDB8),
-    onSecondary = Color(0xFF293326),
-    background = Color(0xFF111510),
-    onBackground = Color(0xFFE7EBE3),
-    surface = Color(0xFF171D18),
-    onSurface = Color(0xFFE7EBE3),
-    surfaceVariant = Color(0xFF252D26),
-    onSurfaceVariant = Color(0xFFB5BDB2),
-    outline = Color(0xFF465044),
+    primary = Color(0xFFB8D9A9),
+    onPrimary = Color(0xFF172218),
+    primaryContainer = Color(0xFF354A38),
+    onPrimaryContainer = Color(0xFFE0F0D9),
+    secondary = Color(0xFFC4D0BE),
+    onSecondary = Color(0xFF253126),
+    background = Color(0xFF101510),
+    onBackground = Color(0xFFF0F2EC),
+    surface = Color(0xFF1A241D),
+    onSurface = Color(0xFFF0F2EC),
+    surfaceVariant = Color(0xFF26352A),
+    onSurfaceVariant = Color(0xFFA5B0A3),
+    outline = Color(0xFF354438),
     error = Color(0xFFFFB4AB),
     onError = Color(0xFF690005)
 )
 
 @Composable
 internal fun DailyTrackerTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = DailyTrackerColors,
-        typography = Typography(),
-        content = content
-    )
+    MaterialTheme(colorScheme = DailyTrackerColors, typography = Typography(), content = content)
 }

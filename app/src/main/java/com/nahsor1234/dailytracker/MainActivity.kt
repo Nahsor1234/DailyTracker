@@ -3,31 +3,28 @@ package com.nahsor1234.dailytracker
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -36,25 +33,18 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import java.time.LocalDate
 import java.time.ZoneId
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 
-private enum class TrackerDestination {
-    PROGRESS,
-    TIMER
-}
+private enum class TrackerDestination { PROGRESS, TIMER }
 
-/**
- * Android entry point. Both destinations remain composed while switching so
- * screen-local state is retained when the user moves between them.
- */
 class MainActivity : ComponentActivity() {
-
     private var today by mutableStateOf(LocalDate.now(ZoneId.systemDefault()))
-
     private val repository by lazy(LazyThreadSafetyMode.NONE) {
         DailyEntryRepository(applicationContext)
     }
@@ -66,14 +56,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = android.graphics.Color.rgb(17, 21, 16)
-        window.navigationBarColor = android.graphics.Color.rgb(17, 21, 16)
-        window.decorView.systemUiVisibility = 0
-
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
         setContent {
-            DailyTrackerTheme {
-                DailyTrackerApp(repository = repository, today = today)
-            }
+            DailyTrackerTheme { DailyTrackerApp(repository, today) }
         }
     }
 }
@@ -81,39 +75,40 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate) {
     var destination by rememberSaveable { mutableStateOf(TrackerDestination.PROGRESS) }
+    val stateHolder = rememberSaveableStateHolder()
+    val colors = MaterialTheme.colorScheme
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        Box(
-            modifier = if (destination == TrackerDestination.PROGRESS) {
-                Modifier.fillMaxSize()
-            } else {
-                Modifier.size(0.dp)
+    Box(Modifier.fillMaxSize().background(colors.background)) {
+        AnimatedContent(
+            targetState = destination,
+            modifier = Modifier.fillMaxSize().statusBarsPadding(),
+            transitionSpec = {
+                if (targetState == TrackerDestination.TIMER) {
+                    (slideInHorizontally(tween(300)) { it } + fadeIn(tween(180))) togetherWith
+                        (slideOutHorizontally(tween(300)) { -it / 3 } + fadeOut(tween(180)))
+                } else {
+                    (slideInHorizontally(tween(300)) { -it } + fadeIn(tween(180))) togetherWith
+                        (slideOutHorizontally(tween(300)) { it / 3 } + fadeOut(tween(180)))
+                }
+            },
+            label = "screen-slide"
+        ) { target ->
+            stateHolder.SaveableStateProvider(target) {
+                when (target) {
+                    TrackerDestination.PROGRESS -> DailyProgressScreen(
+                        repository, today, modifier = Modifier.padding(bottom = 108.dp)
+                    )
+                    TrackerDestination.TIMER -> TimerScreen(
+                        modifier = Modifier.padding(bottom = 108.dp)
+                    )
+                }
             }
-        ) {
-            DailyProgressScreen(
-                repository = repository,
-                today = today,
-                modifier = Modifier.padding(bottom = 108.dp)
-            )
         }
-
-        Box(
-            modifier = if (destination == TrackerDestination.TIMER) {
-                Modifier.fillMaxSize()
-            } else {
-                Modifier.size(0.dp)
-            }
-        ) {
-            TimerScreen(modifier = Modifier.padding(bottom = 108.dp))
-        }
-
         FloatingNavigationBar(
             selected = destination,
             onSelect = { destination = it },
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .navigationBarsPadding()
-                .padding(bottom = 10.dp)
+            modifier = Modifier.align(Alignment.BottomCenter)
+                .navigationBarsPadding().padding(bottom = 10.dp)
         )
     }
 }
@@ -124,35 +119,19 @@ private fun FloatingNavigationBar(
     onSelect: (TrackerDestination) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val colors = MaterialTheme.colorScheme
-
     Surface(
-        modifier = modifier
-            .width(264.dp)
-            .height(64.dp),
+        modifier = modifier.width(264.dp).height(64.dp),
         shape = CircleShape,
-        color = colors.surfaceVariant,
-        shadowElevation = 12.dp
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shadowElevation = 14.dp
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(6.dp)
-        ) {
-            NavigationItem(
-                label = "Progress",
-                icon = "▦",
-                isSelected = selected == TrackerDestination.PROGRESS,
-                onClick = { onSelect(TrackerDestination.PROGRESS) },
-                modifier = Modifier.weight(1f)
-            )
-            NavigationItem(
-                label = "Timer",
-                icon = "◷",
-                isSelected = selected == TrackerDestination.TIMER,
-                onClick = { onSelect(TrackerDestination.TIMER) },
-                modifier = Modifier.weight(1f)
-            )
+        Row(Modifier.fillMaxSize().padding(6.dp)) {
+            NavigationItem("Progress", TrackerDestination.PROGRESS,
+                selected == TrackerDestination.PROGRESS,
+                { onSelect(TrackerDestination.PROGRESS) }, Modifier.weight(1f))
+            NavigationItem("Timer", TrackerDestination.TIMER,
+                selected == TrackerDestination.TIMER,
+                { onSelect(TrackerDestination.TIMER) }, Modifier.weight(1f))
         }
     }
 }
@@ -160,49 +139,63 @@ private fun FloatingNavigationBar(
 @Composable
 private fun NavigationItem(
     label: String,
-    icon: String,
+    destination: TrackerDestination,
     isSelected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val colors = MaterialTheme.colorScheme
-    val containerColor by animateColorAsState(
-        targetValue = if (isSelected) colors.primaryContainer else Color.Transparent,
-        animationSpec = tween(durationMillis = 180),
-        label = "navigation-item-container"
+    val container by animateColorAsState(
+        if (isSelected) colors.primaryContainer else Color.Transparent,
+        tween(200), label = "nav-container"
     )
-    val foregroundColor by animateColorAsState(
-        targetValue = if (isSelected) colors.onPrimaryContainer else colors.onSurfaceVariant,
-        animationSpec = tween(durationMillis = 180),
-        label = "navigation-item-content"
+    val foreground by animateColorAsState(
+        if (isSelected) colors.onPrimaryContainer else colors.onSurfaceVariant,
+        tween(200), label = "nav-content"
     )
-
     Row(
-        modifier = modifier
-            .fillMaxHeight()
-            .clip(CircleShape)
-            .background(containerColor)
+        modifier.fillMaxHeight().clip(CircleShape).background(container)
             .clickable(onClick = onClick)
             .semantics {
                 contentDescription = label
                 selected = isSelected
                 role = Role.Tab
-            }
-            .padding(horizontal = 10.dp),
+            }.padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
     ) {
-        Text(
-            text = icon,
-            color = foregroundColor,
-            fontSize = 19.sp
-        )
+        NavigationGlyph(destination, foreground, Modifier.size(20.dp))
         Spacer(Modifier.width(7.dp))
-        Text(
-            text = label,
-            color = foregroundColor,
-            fontSize = 13.sp,
-            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium
-        )
+        Text(label, color = foreground, fontSize = 13.sp,
+            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun NavigationGlyph(destination: TrackerDestination, tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val stroke = Stroke(width = 1.8.dp.toPx())
+        if (destination == TrackerDestination.PROGRESS) {
+            val gap = size.width * 0.13f
+            val cell = (size.width - gap) / 2f
+            val radius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx())
+            listOf(
+                androidx.compose.ui.geometry.Offset(0f, 0f),
+                androidx.compose.ui.geometry.Offset(cell + gap, 0f),
+                androidx.compose.ui.geometry.Offset(0f, cell + gap),
+                androidx.compose.ui.geometry.Offset(cell + gap, cell + gap)
+            ).forEach { point ->
+                drawRoundRect(tint, point, androidx.compose.ui.geometry.Size(cell, cell), radius, style = stroke)
+            }
+        } else {
+            val center = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height / 2f)
+            drawCircle(tint, size.minDimension * 0.39f, center, style = stroke)
+            drawLine(tint, center,
+                androidx.compose.ui.geometry.Offset(center.x, center.y - size.height * 0.23f),
+                stroke.width, cap = StrokeCap.Round)
+            drawLine(tint, center,
+                androidx.compose.ui.geometry.Offset(center.x + size.width * 0.18f, center.y + size.height * 0.10f),
+                stroke.width, cap = StrokeCap.Round)
+        }
     }
 }
