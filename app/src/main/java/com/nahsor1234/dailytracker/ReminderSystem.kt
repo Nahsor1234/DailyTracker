@@ -11,6 +11,7 @@ import android.content.Intent
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
+import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
@@ -28,7 +29,8 @@ internal data class TrackerReminder(
     val minute: Int,
     val daily: Boolean,
     val dateEpochDay: Long,
-    val enabled: Boolean
+    val enabled: Boolean,
+    val ringtoneUri: String? = null
 ) {
     fun displayTime(): String = String.format(java.util.Locale.getDefault(), "%02d:%02d", hour, minute)
 }
@@ -53,7 +55,8 @@ internal class ReminderStore(context: Context) {
                             minute = item.getInt("minute"),
                             daily = item.getBoolean("daily"),
                             dateEpochDay = item.getLong("date"),
-                            enabled = item.getBoolean("enabled")
+                            enabled = item.getBoolean("enabled"),
+                            ringtoneUri = item.optString("ringtoneUri").takeIf { it.isNotBlank() }
                         )
                     )
                 }
@@ -75,6 +78,7 @@ internal class ReminderStore(context: Context) {
                     put("daily", reminder.daily)
                     put("date", reminder.dateEpochDay)
                     put("enabled", reminder.enabled)
+                    reminder.ringtoneUri?.let { put("ringtoneUri", it) }
                 }
             )
         }
@@ -108,6 +112,7 @@ internal object ReminderScheduler {
         cancel(context, reminder.id)
         if (!reminder.enabled) return
         val manager = context.getSystemService(AlarmManager::class.java)
+        if (reminder.kind == ReminderKind.ALARM) ReminderNotificationChannels.ensureAlarmChannel(context, reminder.ringtoneUri)
         val triggerAt = nextTriggerMillis(reminder)
         if (triggerAt == null) {
             ReminderStore(context).upsert(reminder.copy(enabled = false))
@@ -163,28 +168,34 @@ internal object ReminderScheduler {
 
 internal object ReminderNotificationChannels {
     const val NOTIFICATIONS = "dailytracker_reminders"
-    const val ALARMS = "dailytracker_alarms"
+    private const val ALARM_CHANNEL_PREFIX = "dailytracker_alarm_"
+
+    fun alarmChannelId(ringtoneUri: String?): String {
+        val sound = ringtoneUri ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)?.toString().orEmpty()
+        return ALARM_CHANNEL_PREFIX + sound.hashCode().toUInt().toString(16)
+    }
 
     fun create(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val manager = context.getSystemService(NotificationManager::class.java)
         val notificationChannel = NotificationChannel(
             NOTIFICATIONS, "Reminders", NotificationManager.IMPORTANCE_DEFAULT
+        ).apply { description = "Scheduled study and daily reminders" }
+        context.getSystemService(NotificationManager::class.java).createNotificationChannel(notificationChannel)
+        ensureAlarmChannel(context, null)
+    }
+
+    fun ensureAlarmChannel(context: Context, ringtoneUri: String?) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val soundUri = ringtoneUri?.let(Uri::parse)
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+        val channel = NotificationChannel(
+            alarmChannelId(ringtoneUri), "DailyTracker alarm", NotificationManager.IMPORTANCE_HIGH
         ).apply {
-            description = "Scheduled study and daily reminders"
-        }
-        val alarmChannel = NotificationChannel(
-            ALARMS, "Alarms", NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = "User-scheduled alarms"
+            description = "User-scheduled DailyTracker alarms"
             enableVibration(true)
-            setSound(
-                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM),
-                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).build()
-            )
+            setSound(soundUri, AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).build())
         }
-        manager.createNotificationChannel(notificationChannel)
-        manager.createNotificationChannel(alarmChannel)
+        context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }
 
     fun show(context: Context, reminder: TrackerReminder) {
@@ -202,7 +213,7 @@ internal object ReminderNotificationChannels {
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val channel = if (reminder.kind == ReminderKind.ALARM) ALARMS else NOTIFICATIONS
+        val channel = if (reminder.kind == ReminderKind.ALARM) alarmChannelId(reminder.ringtoneUri) else NOTIFICATIONS
         val notification = Notification.Builder(context, channel)
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
             .setContentTitle(reminder.title)
