@@ -73,7 +73,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
     var finished by rememberSaveable { mutableStateOf(false) }
     val particles = remember { mutableStateListOf<DialParticle>() }
     var releaseParticles by remember { mutableStateOf(false) }
-    var previousCountdownMinute by rememberSaveable { mutableLongStateOf(-1L) }
+    var completedParticleMinute by rememberSaveable { mutableLongStateOf(0L) }
 
     LaunchedEffect(watchRunning, countdownRunning) {
         while (watchRunning || countdownRunning) {
@@ -97,18 +97,18 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
     val configuredMillis = remember(minutesText) {
         (minutesText.toLongOrNull()?.takeIf { it in 1L..MAX_COUNTDOWN_MINUTES } ?: 0L) * 60_000L
     }
+    val countdownElapsedMillis = (configuredMillis - remaining).coerceIn(0L, configuredMillis)
     val progress = if (configuredMillis > 0L)
-        (1f - remaining.toFloat() / configuredMillis).coerceIn(0f, 1f) else 0f
+        (countdownElapsedMillis.toFloat() / configuredMillis).coerceIn(0f, 1f) else 0f
+    val countdownMinuteProgress = (countdownElapsedMillis % 60_000L) / 60_000f
+    val completedCountdownMinutes = countdownElapsedMillis / 60_000L
 
-    // Release the chamber after each complete revolution of the countdown indicator.
-    LaunchedEffect(countdownRunning, remaining / 60_000L) {
-        val currentMinute = remaining / 60_000L
-        if (countdownRunning && previousCountdownMinute >= 0L &&
-            currentMinute < previousCountdownMinute
-        ) {
+    // A release happens only after a full elapsed minute, never on the first timer tick.
+    LaunchedEffect(countdownRunning, completedCountdownMinutes) {
+        if (countdownRunning && completedCountdownMinutes > completedParticleMinute) {
             releaseParticles = true
         }
-        previousCountdownMinute = currentMinute
+        completedParticleMinute = completedCountdownMinutes
     }
 
     Surface(modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -169,7 +169,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
                         else -> "Set a duration and begin"
                     },
                     progress = progress,
-                    indicatorProgress = ((60_000L - (remaining % 60_000L)) % 60_000L) / 60_000f,
+                    indicatorProgress = countdownMinuteProgress,
                     particles = particles,
                     emitParticles = countdownRunning,
                     releaseParticles = releaseParticles,
