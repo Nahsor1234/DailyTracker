@@ -138,7 +138,7 @@ private fun DailyTrackerApp(
     var cloudSyncStatus by rememberSaveable { mutableStateOf("") }
     var cloudDataRevision by remember { mutableIntStateOf(0) }
     var syncInProgress by remember { mutableStateOf(false) }
-    var passwordRecoveryPending by remember { mutableStateOf(false) }
+    var passwordRecoveryPending by rememberSaveable { mutableStateOf(false) }
     val syncWorker = remember(cloud) {
         Executors.newSingleThreadExecutor { task ->
             Thread(task, "dailytracker-session-check").apply { isDaemon = true }
