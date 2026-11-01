@@ -10,8 +10,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.time.Instant
 import java.time.LocalDate
-import java.time.ZoneId
-import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -19,7 +17,7 @@ import javax.crypto.spec.GCMParameterSpec
 
 /**
  * Small REST client for Supabase Auth and PostgREST.
- * All methods are blocking: call from Dispatchers.IO or a worker thread.
+ * All methods are blocking and must be called from a worker thread.
  */
 internal class DailyTrackerCloud(context: Context) {
     private val storage = EncryptedSessionStore(context.applicationContext)
@@ -27,6 +25,7 @@ internal class DailyTrackerCloud(context: Context) {
     private val apiKey = BuildConfig.SUPABASE_PUBLISHABLE_KEY
 
     data class Account(val id: String, val email: String, val verified: Boolean)
+
     data class CloudEntry(
         val date: LocalDate,
         val completed: Boolean,
@@ -44,116 +43,178 @@ internal class DailyTrackerCloud(context: Context) {
         val verified: Boolean
     )
 
-    fun currentAccount(): Account? = storage.read()?.let {
-        if (it.expiresAt > Instant.now().epochSecond + 60) {
-            Account(it.userId, it.email, it.verified)
+    fun currentAccount(): Account? {
+        val saved = storage.read() ?: return null
+        return if (saved.expiresAt > Instant.now().epochSecond + 60) {
+            Account(saved.userId, saved.email, saved.verified)
         } else {
-            runCatching { refresh(it.refreshToken) }.getOrNull()?.let { fresh ->
-                Account(fresh.userId, fresh.email, fresh.verified)
-            }
+            runCatching { refresh(saved.refreshToken) }
+                .getOrNull()
+                ?.let { Account(it.userId, it.email, it.verified) }
         }
     }
 
     fun signUp(email: String, password: String) {
         val response = request(
-            "POST", "/auth/v1/signup",
+            "POST",
+            "/auth/v1/signup",
             JSONObject().put("email", email.trim()).put("password", password),
             authenticated = false
-        )
-        val access = response.optString("access_token")
-        if (access.isNotBlank()) saveSession(response)
+        ) as JSONObject
+        // Supabase may return a user without a session while email confirmation is pending.
+        if (response.optString("access_token").isNotBlank()) saveSession(response)
     }
 
     fun signIn(email: String, password: String): Account {
         val response = request(
-            "POST", "/auth/v1/token?grant_type=password",
+            "POST",
+            "/auth/v1/token?grant_type=password",
             JSONObject().put("email", email.trim()).put("password", password),
             authenticated = false
-        )
+        ) as JSONObject
         saveSession(response)
-        return requireNotNull(currentAccount())
+        return requireNotNull(currentAccount()) {
+            "Sign-in succeeded but the session could not be stored. Please sign in again."
+        }
+    }
+
+    fun resendVerification(email: String) {
+        request(
+            "POST",
+            "/auth/v1/resend",
+            JSONObject().put("type", "signup").put("email", email.trim()),
+            authenticated = false
+        )
     }
 
     fun requestPasswordReset(email: String) {
         request(
-            "POST", "/auth/v1/recover",
+            "POST",
+            "/auth/v1/recover",
             JSONObject().put("email", email.trim()),
             authenticated = false
         )
     }
 
     fun signOut() {
-        val session = storage.read()
-        if (session != null) runCatching {
-            request("POST", "/auth/v1/logout", JSONObject(), authenticated = true)
+        if (storage.read() != null) {
+            runCatching {
+                request("POST", "/auth/v1/logout", JSONObject(), authenticated = true)
+            }
         }
         storage.clear()
     }
 
-    fun sync(localEntries: List<CloudEntry>) {
-        val session = requireNotNull(storage.read()) { "Sign in before syncing." }
-        val remote = request(
-            "GET", "/rest/v1/daily_progress?select=local_date,completed,description,updated_at,time_zone_id",
-            null, authenticated = true
-        ) as JSONArray
+    /**
+     * Merge records by local_date. The newest updated_at wins; an exact timestamp tie
+     * preserves the remote record. RLS scopes all reads and writes to the active user.
+     */
+    fun sync(localEntries: List<CloudEntry>): List<CloudEntry> {
+        val account = currentAccount() ?: error("Your session has expired. Sign in again.")
+        require(account.verified) { "Verify your email before syncing DailyTracker data." }
+        val session = requireNotNull(storage.read()) { "Authentication required." }
+        require(session.userId == account.id) { "The signed-in account changed. Sign in again." }
 
-        val remoteByDate = buildMap {
-            for (i in 0 until remote.length()) {
-                val item = remote.getJSONObject(i)
-                put(item.getString("local_date"), item)
+        val remoteRows = fetchAllRemoteEntries()
+        val remoteByDate = remoteRows.associateBy { it.getString("local_date") }
+        val merged = remoteRows.associate { row ->
+            val entry = row.toCloudEntry()
+            entry.date to entry
+        }.toMutableMap()
+        val uploads = JSONArray()
+
+        for (local in localEntries) {
+            val key = local.date.toString()
+            val remote = remoteByDate[key]
+            val remoteEntry = remote?.toCloudEntry()
+            if (remoteEntry == null || local.updatedAt > remoteEntry.updatedAt) {
+                uploads.put(
+                    JSONObject()
+                        .put("user_id", session.userId)
+                        .put("local_date", key)
+                        .put("completed", local.completed)
+                        .put("description", local.description)
+                        .put("time_zone_id", local.timeZoneId)
+                        .put("updated_at", Instant.ofEpochMilli(local.updatedAt).toString())
+                        .put("revision", (remote?.optLong("revision") ?: 0L) + 1L)
+                )
+                merged[local.date] = local
             }
+            // If remote is newer or timestamps tie, merged already contains the remote row.
         }
-        val toUpload = JSONArray()
-        for (entry in localEntries) {
-            val date = entry.date.toString()
-            val remoteEntry = remoteByDate[date]
-            val remoteTime = remoteEntry?.optString("updated_at")?.let {
-                runCatching { Instant.parse(it).toEpochMilli() }.getOrDefault(0L)
-            } ?: 0L
-            // Local wins only when newer; equal timestamps preserve the server copy.
-            if (entry.updatedAt > remoteTime) {
-                toUpload.put(JSONObject()
-                    .put("user_id", session.userId)
-                    .put("local_date", date)
-                    .put("completed", entry.completed)
-                    .put("description", entry.description)
-                    .put("time_zone_id", entry.timeZoneId)
-                    .put("updated_at", Instant.ofEpochMilli(entry.updatedAt).toString())
-                    .put("revision", (remoteEntry?.optLong("revision") ?: 0L) + 1L))
-            }
-        }
-        if (toUpload.length() > 0) {
+
+        if (uploads.length() > 0) {
             request(
-                "POST", "/rest/v1/daily_progress?on_conflict=user_id,local_date",
-                toUpload, authenticated = true,
+                "POST",
+                "/rest/v1/daily_progress?on_conflict=user_id,local_date",
+                uploads,
+                authenticated = true,
                 extraHeaders = mapOf("Prefer" to "resolution=merge-duplicates,return=minimal")
             )
         }
+
+        return merged.values.sortedBy { it.date }
+    }
+
+    private fun fetchAllRemoteEntries(): List<JSONObject> {
+        val entries = mutableListOf<JSONObject>()
+        var lastDate: String? = null
+        while (true) {
+            val filter = lastDate?.let { "&local_date=gt.$it" }.orEmpty()
+            val path = "/rest/v1/daily_progress" +
+                "?select=local_date,completed,description,updated_at,time_zone_id,revision" +
+                "&order=local_date.asc&limit=1000$filter"
+            val page = request("GET", path, null, authenticated = true) as JSONArray
+            for (index in 0 until page.length()) {
+                entries += page.getJSONObject(index)
+            }
+            if (page.length() < 1000) break
+            lastDate = page.getJSONObject(page.length() - 1).getString("local_date")
+        }
+        return entries
+    }
+
+    private fun JSONObject.toCloudEntry(): CloudEntry {
+        val timestamp = Instant.parse(getString("updated_at")).toEpochMilli()
+        return CloudEntry(
+            date = LocalDate.parse(getString("local_date")),
+            completed = getBoolean("completed"),
+            description = optString("description"),
+            updatedAt = timestamp,
+            timeZoneId = optString("time_zone_id").ifBlank { "UTC" }
+        )
     }
 
     private fun refresh(refreshToken: String): Session {
         val response = request(
-            "POST", "/auth/v1/token?grant_type=refresh_token",
+            "POST",
+            "/auth/v1/token?grant_type=refresh_token",
             JSONObject().put("refresh_token", refreshToken),
             authenticated = false
-        )
+        ) as JSONObject
         saveSession(response)
-        return requireNotNull(storage.read())
+        return requireNotNull(storage.read()) { "The refreshed session could not be stored." }
     }
 
     private fun saveSession(json: JSONObject) {
-        val user = json.optJSONObject("user") ?: return
-        val email = user.optString("email")
-        val verified = !user.isNull("email_confirmed_at") &&
-            user.optString("email_confirmed_at").isNotBlank()
+        val user = json.optJSONObject("user")
+            ?: error("Supabase did not return an account for this session.")
         val access = json.optString("access_token")
         val refresh = json.optString("refresh_token")
-        if (access.isBlank() || refresh.isBlank()) return
-        storage.write(Session(
-            access, refresh,
-            Instant.now().epochSecond + json.optLong("expires_in", 3600),
-            user.getString("id"), email, verified
-        ))
+        require(access.isNotBlank() && refresh.isNotBlank()) {
+            "Supabase did not issue a persistent session. Verify your email, then sign in."
+        }
+        val verifiedAt = user.optString("email_confirmed_at")
+        storage.write(
+            Session(
+                accessToken = access,
+                refreshToken = refresh,
+                expiresAt = Instant.now().epochSecond + json.optLong("expires_in", 3600),
+                userId = user.getString("id"),
+                email = user.optString("email"),
+                verified = verifiedAt.isNotBlank() && verifiedAt != "null"
+            )
+        )
     }
 
     private fun request(
@@ -185,21 +246,27 @@ internal class DailyTrackerCloud(context: Context) {
             }
         }
         try {
-            if (body != null) connection.outputStream.use {
-                it.write(body.toString().toByteArray(Charsets.UTF_8))
+            if (body != null) {
+                connection.outputStream.use {
+                    it.write(body.toString().toByteArray(Charsets.UTF_8))
+                }
             }
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            val responseText = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (code !in 200..299) {
-                val message = runCatching { JSONObject(text).optString("msg")
-                    .ifBlank { JSONObject(text).optString("message") } }.getOrDefault("")
+                val message = runCatching {
+                    val error = JSONObject(responseText)
+                    error.optString("msg")
+                        .ifBlank { error.optString("message") }
+                        .ifBlank { error.optString("error_description") }
+                }.getOrDefault("")
                 throw IllegalStateException(message.ifBlank { "Supabase request failed ($code)." })
             }
             return when {
-                text.isBlank() -> JSONObject()
-                text.trimStart().startsWith("[") -> JSONArray(text)
-                else -> JSONObject(text)
+                responseText.isBlank() -> JSONObject()
+                responseText.trimStart().startsWith("[") -> JSONArray(responseText)
+                else -> JSONObject(responseText)
             }
         } finally {
             connection.disconnect()
@@ -207,11 +274,12 @@ internal class DailyTrackerCloud(context: Context) {
     }
 }
 
-/** AES-256-GCM session encryption backed by a non-exportable Android Keystore key. */
+/** AES-GCM session encryption backed by a non-exportable Android Keystore key. */
 private class EncryptedSessionStore(context: Context) {
     private val prefs = context.getSharedPreferences("cloud_session", Context.MODE_PRIVATE)
 
-    @Synchronized fun write(session: DailyTrackerCloud.Session) {
+    @Synchronized
+    fun write(session: DailyTrackerCloud.Session) {
         val plain = JSONObject()
             .put("access", session.accessToken)
             .put("refresh", session.refreshToken)
@@ -219,42 +287,59 @@ private class EncryptedSessionStore(context: Context) {
             .put("user", session.userId)
             .put("email", session.email)
             .put("verified", session.verified)
-            .toString().toByteArray(Charsets.UTF_8)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val encrypted = cipher.doFinal(plain)
-        prefs.edit()
-            .putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-            .putString("data", Base64.encodeToString(encrypted, Base64.NO_WRAP))
-            .apply()
+        check(
+            prefs.edit()
+                .putString("iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+                .putString("data", Base64.encodeToString(encrypted, Base64.NO_WRAP))
+                .commit()
+        ) { "The encrypted session could not be saved." }
     }
 
-    @Synchronized fun read(): DailyTrackerCloud.Session? = runCatching {
+    @Synchronized
+    fun read(): DailyTrackerCloud.Session? = runCatching {
         val iv = Base64.decode(requireNotNull(prefs.getString("iv", null)), Base64.NO_WRAP)
         val data = Base64.decode(requireNotNull(prefs.getString("data", null)), Base64.NO_WRAP)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, iv))
         val json = JSONObject(String(cipher.doFinal(data), Charsets.UTF_8))
         DailyTrackerCloud.Session(
-            json.getString("access"), json.getString("refresh"), json.getLong("expires"),
-            json.getString("user"), json.getString("email"), json.getBoolean("verified")
+            json.getString("access"),
+            json.getString("refresh"),
+            json.getLong("expires"),
+            json.getString("user"),
+            json.getString("email"),
+            json.getBoolean("verified")
         )
     }.getOrNull()
 
-    @Synchronized fun clear() { prefs.edit().clear().apply() }
+    @Synchronized
+    fun clear() {
+        prefs.edit().clear().commit()
+    }
 
     private fun key(): SecretKey {
         val store = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        generator.init(KeyGenParameterSpec.Builder(
-            KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-        ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setRandomizedEncryptionRequired(true)
-            .build())
+        generator.init(
+            KeyGenParameterSpec.Builder(
+                KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setRandomizedEncryptionRequired(true)
+                .build()
+        )
         return generator.generateKey()
     }
 
-    private companion object { const val KEY_ALIAS = "dailytracker_supabase_session" }
+    private companion object {
+        const val KEY_ALIAS = "dailytracker_supabase_session"
+    }
 }
