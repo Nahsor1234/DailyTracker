@@ -108,6 +108,12 @@ internal class DailyTrackerCloud(context: Context) {
     }
 
     fun acceptAuthCallback(uri: Uri): AuthCallback {
+        require(
+            uri.scheme == "com.nahsor1234.dailytracker" &&
+                uri.host == "auth" &&
+                uri.path == "/callback"
+        ) { "This is not a DailyTracker authentication callback." }
+
         val parameters = mutableMapOf<String, String>()
         listOfNotNull(uri.encodedQuery, uri.encodedFragment).forEach { encoded ->
             encoded.split("&").forEach { part ->
