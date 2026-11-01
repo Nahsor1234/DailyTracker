@@ -88,6 +88,7 @@ internal fun DailyProgressScreen(
     today: LocalDate,
     cloud: DailyTrackerCloud,
     cloudAccountId: String?,
+    cloudDataRevision: Int,
     onCloudSyncResult: (Result<Int>) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -101,7 +102,6 @@ internal fun DailyProgressScreen(
     var loadFailed by remember { mutableStateOf(false) }
     var saveState by remember { mutableStateOf(SaveState.IDLE) }
     var saveRevision by remember { mutableIntStateOf(0) }
-    var cloudSyncRevision by remember { mutableIntStateOf(0) }
     val screenActive = remember { AtomicBoolean(true) }
 
     DisposableEffect(Unit) {
@@ -148,8 +148,8 @@ internal fun DailyProgressScreen(
         onDispose { active = false }
     }
 
-    LaunchedEffect(cloudSyncRevision) {
-        if (cloudSyncRevision > 0) {
+    LaunchedEffect(cloudDataRevision) {
+        if (cloudDataRevision > 0) {
             repository.loadEntry(selectedDate) { result ->
                 if (screenActive.get()) result.onSuccess { selectedEntry = it }
             }
@@ -170,12 +170,7 @@ internal fun DailyProgressScreen(
                 saveState = if (result.isSuccess) SaveState.SAVED else SaveState.FAILED
             }
             if (result.isSuccess && cloudAccountId != null) {
-                repository.syncCloud(cloud, cloudAccountId) { syncResult ->
-                    onCloudSyncResult(syncResult)
-                    if (syncResult.isSuccess && screenActive.get()) {
-                        cloudSyncRevision += 1
-                    }
-                }
+                repository.syncCloud(cloud, cloudAccountId, onCloudSyncResult)
             }
             if (result.isSuccess && YearMonth.from(updatedEntry.date) == displayedMonth) {
                 completedDates = if (updatedEntry.completed) {
