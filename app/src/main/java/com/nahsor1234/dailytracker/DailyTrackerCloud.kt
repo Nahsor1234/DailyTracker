@@ -349,6 +349,10 @@ internal class DailyTrackerCloud(context: Context) {
             connection.disconnect()
         }
     }
+
+    private companion object {
+        const val AUTH_REDIRECT_URI = "com.nahsor1234.dailytracker://auth/callback"
+    }
 }
 
 /** AES-GCM session encryption backed by a non-exportable Android Keystore key. */
@@ -418,6 +422,5 @@ private class EncryptedSessionStore(context: Context) {
 
     private companion object {
         const val KEY_ALIAS = "dailytracker_supabase_session"
-        const val AUTH_REDIRECT_URI = "com.nahsor1234.dailytracker://auth/callback"
     }
 }
