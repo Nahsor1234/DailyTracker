@@ -11,6 +11,25 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import kotlin.math.PI
+import kotlin.math.sin
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -95,15 +114,20 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate) 
         ) { target ->
             stateHolder.SaveableStateProvider(target) {
                 when (target) {
-                    TrackerDestination.PROGRESS -> DailyProgressScreen(
-                        repository, today, modifier = Modifier.padding(bottom = 108.dp)
-                    )
-                    TrackerDestination.TIMER -> TimerScreen(
-                        modifier = Modifier.padding(bottom = 108.dp)
-                    )
+                    TrackerDestination.PROGRESS -> DailyProgressScreen(repository, today)
+                    TrackerDestination.TIMER -> TimerScreen()
                 }
             }
         }
+        val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        Box(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(150.dp + navInset)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, colors.background.copy(alpha = 0.88f), colors.background)
+                    )
+                )
+        )
         FloatingNavigationBar(
             selected = destination,
             onSelect = { destination = it },
@@ -119,33 +143,116 @@ private fun FloatingNavigationBar(
     onSelect: (TrackerDestination) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // No platform shadow (shadowElevation): on a near-black background it renders as a dark halo
-    // that reads as a rectangle behind the pill. A translucent fill + hairline border floats cleanly.
-    BoxWithConstraints(
-        modifier.width(248.dp).height(60.dp)
-            .clip(CircleShape)
-            .background(Color(0xE61A241D))
-            .border(1.dp, Color.White.copy(alpha = 0.10f), CircleShape)
-            .padding(5.dp)
+    val scheme = MaterialTheme.colorScheme
+    val haptics = LocalHapticFeedback.current
+    val selectedIndex = if (selected == TrackerDestination.PROGRESS) 0 else 1
+    val itemWidth = 125.dp // (260dp bar - 2 * 5dp padding) / 2 items
+
+    // Entrance: the bar rises and fades in once at launch.
+    val entrance = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { entrance.animateTo(1f, tween(650, easing = FastOutSlowInEasing)) }
+
+    // Indicator position in item units (0 = Progress, 1 = Timer). The spring overshoots slightly,
+    // and the indicator stretches while it travels, which gives the liquid feel.
+    val position = remember { Animatable(selectedIndex.toFloat()) }
+    LaunchedEffect(selectedIndex) {
+        position.animateTo(selectedIndex.toFloat(), spring(dampingRatio = 0.62f, stiffness = 320f))
+    }
+
+    // A single highlight that travels slowly along the border. Read only in the draw phase.
+    val shimmer = rememberInfiniteTransition(label = "nav-shimmer").animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(4200, easing = LinearEasing)),
+        label = "nav-shimmer-x"
+    )
+
+    Box(
+        modifier.width(260.dp).height(62.dp)
+            .graphicsLayer {
+                alpha = entrance.value
+                translationY = (1f - entrance.value) * 36.dp.toPx()
+            }
+            .drawBehind {
+                // Soft glow under the active tab. It replaces the platform shadow and follows the indicator.
+                val cx = 5.dp.toPx() + itemWidth.toPx() * (position.value + 0.5f)
+                val glowCenter = Offset(cx, size.height * 0.92f)
+                val glowRadius = size.width * 0.42f
+                drawCircle(
+                    brush = Brush.radialGradient(
+                        colors = listOf(scheme.primary.copy(alpha = 0.22f), Color.Transparent),
+                        center = glowCenter,
+                        radius = glowRadius
+                    ),
+                    radius = glowRadius,
+                    center = glowCenter
+                )
+            }
     ) {
-        val selectedIndex = if (selected == TrackerDestination.PROGRESS) 0 else 1
-        val itemWidth = maxWidth / 2
-        val pillOffset by androidx.compose.animation.core.animateDpAsState(
-            targetValue = itemWidth * selectedIndex,
-            animationSpec = tween(320),
-            label = "navigation-pill"
-        )
         Box(
-            Modifier.offset(x = pillOffset).width(itemWidth).fillMaxHeight()
-                .clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
-        )
-        Row(Modifier.fillMaxSize()) {
-            NavigationItem("Progress", TrackerDestination.PROGRESS,
-                selected == TrackerDestination.PROGRESS,
-                { onSelect(TrackerDestination.PROGRESS) }, Modifier.weight(1f))
-            NavigationItem("Timer", TrackerDestination.TIMER,
-                selected == TrackerDestination.TIMER,
-                { onSelect(TrackerDestination.TIMER) }, Modifier.weight(1f))
+            Modifier.fillMaxSize()
+                .clip(CircleShape)
+                .background(
+                    Brush.verticalGradient(listOf(Color(0xF2222E25), Color(0xF2161E18)))
+                )
+                .drawWithContent {
+                    drawContent()
+                    val stroke = 1.5.dp.toPx()
+                    val corner = CornerRadius(size.height / 2f)
+                    drawRoundRect(
+                        color = Color.White.copy(alpha = 0.10f),
+                        cornerRadius = corner,
+                        style = Stroke(stroke)
+                    )
+                    val x = -120.dp.toPx() + (size.width + 240.dp.toPx()) * shimmer.value
+                    drawRoundRect(
+                        brush = Brush.horizontalGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                scheme.primary.copy(alpha = 0.7f),
+                                Color.Transparent
+                            ),
+                            startX = x - 90.dp.toPx(),
+                            endX = x + 90.dp.toPx()
+                        ),
+                        cornerRadius = corner,
+                        style = Stroke(stroke)
+                    )
+                }
+                .padding(5.dp)
+        ) {
+            Box(
+                Modifier.width(itemWidth).fillMaxHeight()
+                    .graphicsLayer {
+                        translationX = itemWidth.toPx() * position.value
+                        scaleX = 1f + 0.28f * sin(PI.toFloat() * position.value.coerceIn(0f, 1f))
+                    }
+                    .clip(CircleShape)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(scheme.primary.copy(alpha = 0.30f), scheme.primary.copy(alpha = 0.16f))
+                        )
+                    )
+                    .border(1.dp, scheme.primary.copy(alpha = 0.35f), CircleShape)
+            )
+            Row(Modifier.fillMaxSize()) {
+                NavigationItem("Progress", TrackerDestination.PROGRESS,
+                    selected == TrackerDestination.PROGRESS,
+                    {
+                        if (selected != TrackerDestination.PROGRESS) {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        }
+                        onSelect(TrackerDestination.PROGRESS)
+                    }, Modifier.weight(1f))
+                NavigationItem("Timer", TrackerDestination.TIMER,
+                    selected == TrackerDestination.TIMER,
+                    {
+                        if (selected != TrackerDestination.TIMER) {
+                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        }
+                        onSelect(TrackerDestination.TIMER)
+                    }, Modifier.weight(1f))
+            }
         }
     }
 }
@@ -161,7 +268,12 @@ private fun NavigationItem(
     val colors = MaterialTheme.colorScheme
     val foreground by animateColorAsState(
         if (isSelected) colors.primary else colors.onSurfaceVariant,
-        tween(200), label = "nav-content"
+        tween(220), label = "nav-content"
+    )
+    val iconScale by animateFloatAsState(
+        targetValue = if (isSelected) 1.14f else 1f,
+        animationSpec = spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessLow),
+        label = "nav-icon-scale"
     )
     Row(
         modifier.fillMaxHeight().clip(CircleShape)
@@ -174,7 +286,13 @@ private fun NavigationItem(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
     ) {
-        NavigationGlyph(destination, foreground, Modifier.size(20.dp))
+        NavigationGlyph(
+            destination, foreground,
+            Modifier.size(20.dp).graphicsLayer {
+                scaleX = iconScale
+                scaleY = iconScale
+            }
+        )
         Spacer(Modifier.width(7.dp))
         Text(label, color = foreground, fontSize = 13.sp,
             fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium)
