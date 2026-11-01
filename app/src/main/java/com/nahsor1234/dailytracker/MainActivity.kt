@@ -1,6 +1,8 @@
 package com.nahsor1234.dailytracker
 
 import android.os.Bundle
+import android.content.Intent
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import androidx.activity.ComponentActivity
@@ -71,6 +73,7 @@ private enum class TrackerDestination { PROGRESS, TIMER }
 
 class MainActivity : ComponentActivity() {
     private var today by mutableStateOf(LocalDate.now(ZoneId.systemDefault()))
+    private var authCallbackUri by mutableStateOf<Uri?>(null)
     private val repository by lazy(LazyThreadSafetyMode.NONE) {
         DailyEntryRepository(applicationContext)
     }
@@ -97,14 +100,35 @@ class MainActivity : ComponentActivity() {
         }
         ReminderNotificationChannels.create(this)
         ReminderScheduler.rescheduleAll(this)
+        authCallbackUri = intent?.data
         setContent {
-            DailyTrackerTheme { DailyTrackerApp(repository, today, cloud) }
+            DailyTrackerTheme {
+                DailyTrackerApp(
+                    repository = repository,
+                    today = today,
+                    cloud = cloud,
+                    pendingAuthUri = authCallbackUri,
+                    onAuthUriHandled = { authCallbackUri = null }
+                )
+            }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        authCallbackUri = intent.data
     }
 }
 
 @Composable
-private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate, cloud: DailyTrackerCloud) {
+private fun DailyTrackerApp(
+    repository: DailyEntryRepository,
+    today: LocalDate,
+    cloud: DailyTrackerCloud,
+    pendingAuthUri: Uri?,
+    onAuthUriHandled: () -> Unit
+) {
     var destination by rememberSaveable { mutableStateOf(TrackerDestination.PROGRESS) }
     val stateHolder = rememberSaveableStateHolder()
     val colors = MaterialTheme.colorScheme
@@ -113,6 +137,7 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate, 
     var cloudAccountId by remember { mutableStateOf<String?>(null) }
     var cloudSyncStatus by rememberSaveable { mutableStateOf("") }
     var syncInProgress by remember { mutableStateOf(false) }
+    var passwordRecoveryPending by remember { mutableStateOf(false) }
     val syncWorker = remember(cloud) {
         Executors.newSingleThreadExecutor { task ->
             Thread(task, "dailytracker-session-check").apply { isDaemon = true }
@@ -142,6 +167,29 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate, 
 
     DisposableEffect(syncWorker) {
         onDispose { syncWorker.shutdownNow() }
+    }
+
+    LaunchedEffect(pendingAuthUri) {
+        val callbackUri = pendingAuthUri ?: return@LaunchedEffect
+        syncWorker.execute {
+            val result = runCatching { cloud.acceptAuthCallback(callbackUri) }
+            mainHandler.post {
+                result.onSuccess { callback ->
+                    showAccount = true
+                    if (callback.type == "recovery") {
+                        passwordRecoveryPending = true
+                        cloudSyncStatus = "Choose a new password to finish account recovery."
+                    } else {
+                        passwordRecoveryPending = false
+                        startCloudSync(callback.account)
+                    }
+                }.onFailure {
+                    showAccount = true
+                    cloudSyncStatus = "Authentication link failed: " + (it.message ?: "Invalid link.")
+                }
+                onAuthUriHandled()
+            }
+        }
     }
 
     LaunchedEffect(cloud) {
@@ -258,9 +306,16 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate, 
             CloudAccountDialog(
                 cloud = cloud,
                 syncStatus = cloudSyncStatus,
+                passwordRecoveryPending = passwordRecoveryPending,
                 onSignedIn = ::startCloudSync,
+                onPasswordRecoveryComplete = { account ->
+                    passwordRecoveryPending = false
+                    startCloudSync(account)
+                    cloudSyncStatus = "Password updated."
+                },
                 onSignedOut = {
                     cloudAccountId = null
+                    passwordRecoveryPending = false
                     cloudSyncStatus = "Signed out. Local history remains on this device."
                 },
                 onDismiss = { showAccount = false }
