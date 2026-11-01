@@ -45,6 +45,7 @@ internal class DailyTrackerCloud(context: Context) {
         val verified: Boolean
     )
 
+    @Synchronized
     fun currentAccount(): Account? {
         val saved = storage.read() ?: return null
         return if (saved.expiresAt > Instant.now().epochSecond + 60) {
@@ -56,6 +57,7 @@ internal class DailyTrackerCloud(context: Context) {
         }
     }
 
+    @Synchronized
     fun signUp(email: String, password: String) {
         val response = request(
             "POST",
@@ -67,6 +69,7 @@ internal class DailyTrackerCloud(context: Context) {
         if (response.optString("access_token").isNotBlank()) saveSession(response)
     }
 
+    @Synchronized
     fun signIn(email: String, password: String): Account {
         val response = request(
             "POST",
@@ -80,6 +83,7 @@ internal class DailyTrackerCloud(context: Context) {
         }
     }
 
+    @Synchronized
     fun resendVerification(email: String) {
         request(
             "POST",
@@ -89,6 +93,7 @@ internal class DailyTrackerCloud(context: Context) {
         )
     }
 
+    @Synchronized
     fun requestPasswordReset(email: String) {
         request(
             "POST",
@@ -98,6 +103,7 @@ internal class DailyTrackerCloud(context: Context) {
         )
     }
 
+    @Synchronized
     fun signOut() {
         if (storage.read() != null) {
             runCatching {
@@ -107,6 +113,7 @@ internal class DailyTrackerCloud(context: Context) {
         storage.clear()
     }
 
+    @Synchronized
     fun acceptAuthCallback(uri: Uri): AuthCallback {
         require(
             uri.scheme == "com.nahsor1234.dailytracker" &&
@@ -177,6 +184,7 @@ internal class DailyTrackerCloud(context: Context) {
         return AuthCallback(type, Account(session.userId, session.email, session.verified))
     }
 
+    @Synchronized
     fun updatePassword(newPassword: String): Account {
         require(newPassword.length >= 6) { "Password must contain at least 6 characters." }
         request(
@@ -192,6 +200,7 @@ internal class DailyTrackerCloud(context: Context) {
      * Merge records by local_date. The newest updated_at wins; an exact timestamp tie
      * preserves the remote record. RLS scopes all reads and writes to the active user.
      */
+    @Synchronized
     fun sync(localEntries: List<CloudEntry>): List<CloudEntry> {
         val account = currentAccount() ?: error("Your session has expired. Sign in again.")
         require(account.verified) { "Verify your email before syncing DailyTracker data." }
