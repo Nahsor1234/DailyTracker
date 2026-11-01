@@ -12,8 +12,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -29,7 +27,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
@@ -41,7 +38,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.util.Locale
 import kotlin.math.cos
-import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 
@@ -53,7 +49,7 @@ private val ParticlePalette = listOf(
     Color(0xFF91B583), Color(0xFFC2DCB3)
 )
 private data class DialParticle(
-    var x: Float, var y: Float, var vx: Float, var vy: Float,
+    val x: Float, val y: Float, val bornAtMs: Long,
     val radius: Float, val color: Color
 )
 
@@ -155,6 +151,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
                         else -> "Set a duration and begin"
                     },
                     progress = progress,
+                    indicatorProgress = ((60_000L - (remaining % 60_000L)) % 60_000L) / 60_000f,
                     particles = particles,
                     emitParticles = countdownRunning,
                     releaseParticles = releaseParticles,
@@ -251,46 +248,13 @@ private fun CustomDurationControl(value: String, enabled: Boolean, onValueChange
         Spacer(Modifier.height(7.dp))
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Box(Modifier.fillMaxWidth().height(38.dp), contentAlignment = Alignment.Center) {
-                    Canvas(Modifier.fillMaxWidth().height(38.dp)) {
-                        val left = 8.dp.toPx()
-                        val right = size.width - 8.dp.toPx()
-                        val cy = size.height / 2f
-                        val fraction = ((sliderValue - 1f) / 598f).coerceIn(0f, 1f)
-                        val activeEnd = left + (right - left) * fraction
-                        drawLine(Color(0xFF354535), Offset(left, cy), Offset(right, cy),
-                            5.dp.toPx(), cap = StrokeCap.Round)
-                        if (dragging && activeEnd > left + 2f) {
-                            val path = Path().apply {
-                                moveTo(left, cy)
-                                for (i in 0..50) {
-                                    val t = i / 50f
-                                    val x = left + (activeEnd - left) * t
-                                    val wave = sin(i * 0.88f) * 4.5.dp.toPx() * sin(Math.PI * t).toFloat()
-                                    lineTo(x, cy + wave)
-                                }
-                            }
-                            drawPath(path, activeColor,
-                                style = Stroke(5.dp.toPx(), cap = StrokeCap.Round))
-                        } else {
-                            drawLine(activeColor, Offset(left, cy),
-                                Offset(activeEnd, cy), 5.dp.toPx(), cap = StrokeCap.Round)
-                        }
-                    }
-                    Slider(
-                        value = sliderValue,
-                        onValueChange = { onValueChange(it.toInt().coerceIn(1, 599).toString()) },
-                        valueRange = 1f..599f, enabled = enabled, interactionSource = interaction,
-                        modifier = Modifier.fillMaxWidth().height(38.dp),
-                        colors = SliderDefaults.colors(
-                            thumbColor = MaterialTheme.colorScheme.primary,
-                            activeTrackColor = Color.Transparent, inactiveTrackColor = Color.Transparent,
-                            disabledThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            disabledActiveTrackColor = Color.Transparent,
-                            disabledInactiveTrackColor = Color.Transparent
-                        )
-                    )
-                }
+                Slider(
+                    value = sliderValue,
+                    onValueChange = { onValueChange(it.toInt().coerceIn(1, 599).toString()) },
+                    valueRange = 1f..599f,
+                    enabled = enabled,
+                    modifier = Modifier.fillMaxWidth().height(38.dp)
+                )
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("1 min", style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -327,106 +291,112 @@ private fun ParticleTimerDial(
     time: String,
     status: String,
     progress: Float,
+    indicatorProgress: Float = progress,
     particles: MutableList<DialParticle>,
     emitParticles: Boolean,
     releaseParticles: Boolean,
     onReleaseFinished: () -> Unit = {}
 ) {
     val colors = MaterialTheme.colorScheme
-    var particleFrame by remember { mutableIntStateOf(0) }
-    LaunchedEffect(emitParticles, releaseParticles) {
-        var accumulator = 0f
-        while (isActive && (emitParticles || releaseParticles || particles.isNotEmpty())) {
-            val dt = 0.016f
-            if (emitParticles && !releaseParticles) {
-                accumulator += 32f * dt
-                while (accumulator >= 1f && particles.size < 520) {
-                    val a = Random.nextFloat() * 0.72f - 0.36f
-                    particles.add(DialParticle(
-                        x = 132f + sin(a) * 17f, y = 17f,
-                        vx = Random.nextFloat() * 12f - 6f, vy = 0f,
-                        radius = Random.nextFloat() * 1.7f + 2.1f,
-                        color = ParticlePalette.random()
-                    ))
-                    accumulator -= 1f
+    var frameTimeMs by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    var releaseStartedAt by remember { mutableLongStateOf(0L) }
+
+    // A staggered close-packed layout fills the circular chamber from the bottom upward.
+    // It avoids frame-by-frame particle collision calculations and remains deterministic.
+    val particleSlots = remember {
+        buildList {
+            val center = 132f
+            val chamberRadius = 99f
+            val spacing = 7.1f
+            var row = 0
+            var y = center + chamberRadius - 3f
+            while (y >= center - chamberRadius + 3f) {
+                val dy = y - center
+                val halfWidth = sqrt((chamberRadius * chamberRadius - dy * dy).coerceAtLeast(0f))
+                val offset = if (row % 2 == 0) 0f else spacing / 2f
+                var x = center - halfWidth + 3f + offset
+                while (x <= center + halfWidth - 3f) {
+                    add(Offset(x, y))
+                    x += spacing
                 }
+                y -= spacing * 0.87f
+                row++
             }
-            particles.forEach { p ->
-                p.vy += (if (releaseParticles) 760f else 500f) * dt
-                p.x += p.vx * dt
-                p.y += p.vy * dt
-                if (!releaseParticles) {
-                    val dx = p.x - 132f
-                    val dy = p.y - 132f
-                    val distance = sqrt(dx * dx + dy * dy)
-                    val boundary = 113f - p.radius
-                    if (distance > boundary && distance > 0f) {
-                        val nx = dx / distance
-                        val ny = dy / distance
-                        p.x = 132f + nx * boundary
-                        p.y = 132f + ny * boundary
-                        val dot = p.vx * nx + p.vy * ny
-                        p.vx -= 1.25f * dot * nx
-                        p.vy -= 1.25f * dot * ny
-                    }
-                }
-            }
-            if (!releaseParticles) {
-                for (i in 0 until particles.size) {
-                    val a = particles[i]
-                    for (j in i + 1 until particles.size) {
-                        val b = particles[j]
-                        val dx = b.x - a.x
-                        val dy = b.y - a.y
-                        val d2 = dx * dx + dy * dy
-                        val min = a.radius + b.radius
-                        if (d2 < min * min && d2 > 0.001f) {
-                            val d = sqrt(d2)
-                            val nx = dx / d
-                            val ny = dy / d
-                            val overlap = (min - d) * 0.5f
-                            a.x -= nx * overlap; a.y -= ny * overlap
-                            b.x += nx * overlap; b.y += ny * overlap
-                            val relative = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny
-                            if (relative < 0f) {
-                                a.vx += relative * 0.2f * nx; a.vy += relative * 0.2f * ny
-                                b.vx -= relative * 0.2f * nx; b.vy -= relative * 0.2f * ny
-                            }
-                        }
-                    }
-                }
-            }
-            if (releaseParticles) particles.removeAll { it.y > 280f }
-            particleFrame++
-            delay(16L)
         }
-        if (releaseParticles) {
-            particles.clear()
-            onReleaseFinished()
+    }
+
+    LaunchedEffect(emitParticles, releaseParticles) {
+        var emission = 0f
+        if (releaseParticles) releaseStartedAt = SystemClock.elapsedRealtime()
+        while (isActive && (emitParticles || releaseParticles)) {
+            val nowMs = SystemClock.elapsedRealtime()
+            frameTimeMs = nowMs
+
+            if (emitParticles && !releaseParticles) {
+                emission += 18f / 60f
+                while (emission >= 1f && particles.size < particleSlots.size) {
+                    val slot = particleSlots[particles.size]
+                    val jitter = Random.nextFloat() * 1.8f - 0.9f
+                    particles.add(
+                        DialParticle(
+                            x = slot.x + jitter,
+                            y = slot.y,
+                            bornAtMs = nowMs,
+                            radius = Random.nextFloat() * 0.65f + 2.25f,
+                            color = ParticlePalette.random()
+                        )
+                    )
+                    emission -= 1f
+                }
+            }
+
+            if (releaseParticles && nowMs - releaseStartedAt >= 900L) {
+                particles.clear()
+                onReleaseFinished()
+                break
+            }
+            delay(16L)
         }
     }
 
     Box(Modifier.size(264.dp), contentAlignment = Alignment.Center) {
         Canvas(Modifier.fillMaxSize().padding(5.dp)) {
-            val currentFrame = particleFrame
+            val currentFrameTime = frameTimeMs
             val stroke = 9.dp.toPx()
             val radius = size.minDimension / 2f - stroke / 2f
             drawCircle(colors.surfaceVariant, style = Stroke(stroke))
-            drawArc(colors.primary, -90f, 360f * progress.coerceIn(0f, 1f), false,
-                style = Stroke(stroke, cap = StrokeCap.Round))
-            val angle = Math.toRadians(-90.0 + 360.0 * progress.coerceIn(0f, 1f))
-            val ball = Offset(center.x + cos(angle).toFloat() * radius,
-                center.y + sin(angle).toFloat() * radius)
-            drawCircle(Color(0xFFE0F0D9), stroke * 0.88f, ball)
-            drawCircle(colors.primary, stroke * 0.42f, ball)
+            drawArc(
+                colors.primary, -90f, 360f * progress.coerceIn(0f, 1f), false,
+                style = Stroke(stroke, cap = StrokeCap.Round)
+            )
+
+            val angle = Math.toRadians(-90.0 + 360.0 * indicatorProgress.coerceIn(0f, 1f))
+            val ball = Offset(
+                center.x + cos(angle).toFloat() * radius,
+                center.y + sin(angle).toFloat() * radius
+            )
+            drawCircle(Color(0xFFE0F0D9), stroke * 0.9f, ball)
+            drawCircle(colors.primary, stroke * 0.43f, ball)
+
             val chamberRadius = size.minDimension / 2f - 14.dp.toPx()
-            particles.forEach { p ->
-                val x = center.x + (p.x - 132f) / 132f * chamberRadius
-                val y = center.y + (p.y - 132f) / 132f * chamberRadius
-                val r = p.radius / 132f * chamberRadius
-                drawCircle(p.color, r, Offset(x, y))
-                drawCircle(Color.White.copy(alpha = 0.28f), r * 0.23f,
-                    Offset(x - r * 0.28f, y - r * 0.3f))
+            particles.forEach { particle ->
+                val age = (currentFrameTime - particle.bornAtMs).coerceAtLeast(0L)
+                val fall = (age / 520f).coerceIn(0f, 1f)
+                val easedFall = 1f - (1f - fall) * (1f - fall)
+                val drain = if (releaseParticles) {
+                    ((currentFrameTime - releaseStartedAt) / 900f).coerceIn(0f, 1f)
+                } else 0f
+                val x = center.x + (particle.x - 132f) / 132f * chamberRadius
+                val targetY = center.y + (particle.y - 132f) / 132f * chamberRadius
+                val startY = center.y - chamberRadius - 12.dp.toPx()
+                val settledY = startY + (targetY - startY) * easedFall
+                val y = settledY + drain * size.height * 1.05f
+                val r = particle.radius / 132f * chamberRadius
+                drawCircle(particle.color, r, Offset(x, y))
+                drawCircle(
+                    Color.White.copy(alpha = 0.34f), r * 0.25f,
+                    Offset(x - r * 0.28f, y - r * 0.3f)
+                )
             }
         }
         Column(Modifier.fillMaxWidth(0.82f), horizontalAlignment = Alignment.CenterHorizontally) {
