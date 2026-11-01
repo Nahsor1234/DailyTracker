@@ -70,6 +70,9 @@ class MainActivity : ComponentActivity() {
     private val repository by lazy(LazyThreadSafetyMode.NONE) {
         DailyEntryRepository(applicationContext)
     }
+    private val cloud by lazy(LazyThreadSafetyMode.NONE) {
+        DailyTrackerCloud(applicationContext)
+    }
 
     override fun onResume() {
         super.onResume()
@@ -101,9 +104,12 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate, 
     var destination by rememberSaveable { mutableStateOf(TrackerDestination.PROGRESS) }
     val stateHolder = rememberSaveableStateHolder()
     val colors = MaterialTheme.colorScheme
-    var showReminders by rememberSaveable { mutableStateOf(false) }\n    var showAccount by rememberSaveable { mutableStateOf(false) }
+    var showReminders by rememberSaveable { mutableStateOf(false) }
+    var showAccount by rememberSaveable { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
-    BackHandler(enabled = showReminders || showAccount) {\n        if (showReminders) showReminders = false else showAccount = false\n    }
+    BackHandler(enabled = showReminders || showAccount) {
+        if (showReminders) showReminders = false else showAccount = false
+    }
 
     // The main UI is composed once and stays composed while Reminders is open; only its zoom and
     // fade change. Swapping it out with AnimatedContent disposes the whole Progress screen
@@ -174,6 +180,10 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate, 
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .navigationBarsPadding().padding(bottom = 10.dp)
             )
+            androidx.compose.material3.TextButton(
+                onClick = { showAccount = true },
+                modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(top = 8.dp, start = 12.dp)
+            ) { Text("Account") }
             ReminderEntryButton(
                 onClick = {
                     // The UI underneath stays composed, so drop focus (and the keyboard) explicitly.
@@ -183,6 +193,10 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate, 
                 modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding()
                     .padding(top = 12.dp, end = 16.dp)
             )
+        }
+
+        if (showAccount) {
+            CloudAccountDialog(cloud = cloud, onDismiss = { showAccount = false })
         }
 
         AnimatedVisibility(
