@@ -54,24 +54,52 @@ jobs:
           echo "Permanent signing keystore fingerprint verified."
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
-      - name: Verify APK signature
+      - name: Sign and verify APK
         if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
           APK="app/build/outputs/apk/debug/app-debug.apk"
+          SIGNED_APK="app/build/outputs/apk/debug/app-debug-signed.apk"
           APKSIGNER="${ANDROID_HOME}/build-tools/35.0.0/apksigner"
+          KEYSTORE="$HOME/.android/debug.keystore"
+
+          if [ ! -s "$APK" ]; then
+            echo "::error::Built APK not found or empty: $APK"
+            exit 1
+          fi
           if [ ! -x "$APKSIGNER" ]; then
             echo "::error::apksigner not found at $APKSIGNER"
             exit 1
           fi
-          "$APKSIGNER" verify --verbose "$APK"
-          ACTUAL_FINGERPRINT=$("$APKSIGNER" verify --print-certs "$APK" | awk -F': ' '/certificate SHA-256 digest:/{gsub(/:/, "", $2); print tolower($2); exit}')
-          EXPECTED_FINGERPRINT="ce52869bcaee870060f44df125e79f6079e9e67e3a69fdf1ecb926b9cd381c94"
-          if [ "$ACTUAL_FINGERPRINT" != "$EXPECTED_FINGERPRINT" ]; then
-            echo "::error::APK was not signed with the permanent DailyTracker key."
+          if [ ! -s "$KEYSTORE" ]; then
+            echo "::error::Verified signing keystore is missing: $KEYSTORE"
             exit 1
           fi
-          echo "APK signature verified."
+
+          # Re-sign explicitly with the verified key instead of relying on
+          # Gradle's implicit debug-keystore selection.
+          "$APKSIGNER" sign \
+            --ks "$KEYSTORE" \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out "$SIGNED_APK" \
+            "$APK"
+          mv "$SIGNED_APK" "$APK"
+
+          "$APKSIGNER" verify --verbose "$APK"
+          ACTUAL_FINGERPRINT=$("$APKSIGNER" verify --print-certs "$APK" | awk '/certificate SHA-256 digest:/{print $NF; exit}' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          EXPECTED_FINGERPRINT="ce52869bcaee870060f44df125e79f6079e9e67e3a69fdf1ecb926b9cd381c94"
+
+          if [ -z "$ACTUAL_FINGERPRINT" ]; then
+            echo "::error::Could not read the APK signing certificate SHA-256 fingerprint."
+            exit 1
+          fi
+          if [ "$ACTUAL_FINGERPRINT" != "$EXPECTED_FINGERPRINT" ]; then
+            echo "::error::APK signing certificate does not match the permanent DailyTracker key."
+            exit 1
+          fi
+          echo "APK signature verified against the permanent signing identity."
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
