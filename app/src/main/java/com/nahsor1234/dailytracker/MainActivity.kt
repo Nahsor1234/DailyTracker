@@ -158,16 +158,12 @@ private fun NavigationItem(
     modifier: Modifier = Modifier
 ) {
     val colors = MaterialTheme.colorScheme
-    val container by animateColorAsState(
-        if (isSelected) colors.primaryContainer else Color.Transparent,
-        tween(200), label = "nav-container"
-    )
     val foreground by animateColorAsState(
         if (isSelected) colors.onPrimaryContainer else colors.onSurfaceVariant,
         tween(200), label = "nav-content"
     )
     Row(
-        modifier.fillMaxHeight().clip(CircleShape).background(container)
+        modifier.fillMaxHeight().clip(CircleShape)
             .clickable(onClick = onClick)
             .semantics {
                 contentDescription = label
