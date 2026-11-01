@@ -35,7 +35,7 @@ internal class DailyTrackerCloud(context: Context) {
         val timeZoneId: String
     )
 
-    private data class Session(
+    internal data class Session(
         val accessToken: String,
         val refreshToken: String,
         val expiresAt: Long,
