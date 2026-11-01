@@ -124,8 +124,9 @@ internal fun CloudAccountDialog(
                     if (!account!!.verified) {
                         TextButton(
                             onClick = {
-                                runTask(
-                                    task = { cloud.resendVerification(account!!.email) },
+                                val verificationEmail = account?.email.orEmpty()
+                            runTask(
+                                    task = { cloud.resendVerification(verificationEmail) },
                                     onComplete = { result ->
                                         message = result.fold(
                                             { "Verification email requested. Check your inbox." },
