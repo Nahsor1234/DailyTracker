@@ -108,7 +108,11 @@ internal object ReminderScheduler {
         cancel(context, reminder.id)
         if (!reminder.enabled) return
         val manager = context.getSystemService(AlarmManager::class.java)
-        val triggerAt = nextTriggerMillis(reminder) ?: return
+        val triggerAt = nextTriggerMillis(reminder)
+        if (triggerAt == null) {
+            ReminderStore(context).upsert(reminder.copy(enabled = false))
+            return
+        }
         val pendingIntent = pendingIntent(context, reminder.id)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && manager.canScheduleExactAlarms()) {
             manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
