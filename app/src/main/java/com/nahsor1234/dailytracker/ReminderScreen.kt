@@ -2,14 +2,17 @@ package com.nahsor1234.dailytracker
 
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
+import android.media.RingtoneManager
 import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -26,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -64,7 +68,19 @@ internal fun ReminderScreen(onBack: () -> Unit) {
     var daily by remember { mutableStateOf(true) }
     var date by remember { mutableStateOf(LocalDate.now()) }
     var editingId by remember { mutableStateOf<Long?>(null) }
+    var ringtoneUri by remember { mutableStateOf<String?>(null) }
+    var deleteConfirmation by remember { mutableStateOf<TrackerReminder?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
+
+    val ringtonePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val picked = result.data?.getParcelableExtra<Uri>(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+            ringtoneUri = picked?.toString()
+            message = null
+        }
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -84,6 +100,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
         daily = true
         date = LocalDate.now()
         editingId = null
+        ringtoneUri = null
         message = null
     }
 
@@ -108,7 +125,8 @@ internal fun ReminderScreen(onBack: () -> Unit) {
             minute = minute,
             daily = daily,
             dateEpochDay = date.toEpochDay(),
-            enabled = true
+            enabled = true,
+            ringtoneUri = if (kind == ReminderKind.ALARM) ringtoneUri else null
         )
         store.upsert(reminder)
         ReminderScheduler.schedule(context, reminder)
@@ -145,29 +163,39 @@ internal fun ReminderScreen(onBack: () -> Unit) {
                 color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(22.dp))
 
-            Row(
+            BoxWithConstraints(
                 Modifier.fillMaxWidth().clip(CircleShape)
                     .background(Color.White.copy(alpha = 0.045f))
-                    .border(1.dp, Color.White.copy(alpha = 0.08f), CircleShape).padding(4.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    .border(1.dp, Color.White.copy(alpha = 0.08f), CircleShape).padding(4.dp)
             ) {
-                ReminderKind.entries.forEach { option ->
-                    val selected = kind == option
-                    Box(
-                        Modifier.weight(1f).clip(CircleShape)
-                            .background(if (selected) colors.primary.copy(alpha = 0.18f) else Color.Transparent)
-                            .clickable {
-                                kind = option
-                                message = null
-                            }.padding(vertical = 12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            if (option == ReminderKind.NOTIFICATION) "Notification" else "Alarm",
-                            color = if (selected) colors.primary else colors.onSurfaceVariant,
-                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                            fontSize = 14.sp
-                        )
+                val indicatorOffset by animateDpAsState(
+                    targetValue = if (kind == ReminderKind.ALARM) maxWidth / 2 else 0.dp,
+                    animationSpec = tween(300, easing = FastOutSlowInEasing),
+                    label = "reminder-type-indicator"
+                )
+                Box(
+                    Modifier.offset(x = indicatorOffset).width(maxWidth / 2).fillMaxHeight()
+                        .clip(CircleShape)
+                        .background(colors.primary.copy(alpha = 0.18f))
+                )
+                Row(Modifier.fillMaxWidth()) {
+                    ReminderKind.entries.forEach { option ->
+                        val selected = kind == option
+                        Box(
+                            Modifier.weight(1f).clip(CircleShape)
+                                .clickable {
+                                    kind = option
+                                    message = null
+                                }.padding(vertical = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                if (option == ReminderKind.NOTIFICATION) "Notification" else "Alarm",
+                                color = if (selected) colors.primary else colors.onSurfaceVariant,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                fontSize = 14.sp
+                            )
+                        }
                     }
                 }
             }
@@ -238,6 +266,27 @@ internal fun ReminderScreen(onBack: () -> Unit) {
                     ).show()
                 }
                 Spacer(Modifier.height(18.dp))
+
+                if (kind == ReminderKind.ALARM) {
+                    val selectedRingtone = ringtoneUri?.let(Uri::parse)
+                    val ringtoneLabel = selectedRingtone?.let {
+                        RingtoneManager.getRingtone(context, it)?.getTitle(context)
+                    } ?: "Default alarm sound"
+                    SelectionRow(label = "Ringtone", value = ringtoneLabel) {
+                        val pickerIntent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Choose alarm ringtone")
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                            putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false)
+                            putExtra(
+                                RingtoneManager.EXTRA_RINGTONE_EXISTING_URI,
+                                selectedRingtone ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                            )
+                        }
+                        ringtonePicker.launch(pickerIntent)
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
 
                 if (kind == ReminderKind.ALARM && !ReminderScheduler.canScheduleExact(context)) {
                     Column(
@@ -337,20 +386,35 @@ internal fun ReminderScreen(onBack: () -> Unit) {
                             minute = reminder.minute
                             daily = reminder.daily
                             date = LocalDate.ofEpochDay(reminder.dateEpochDay)
+                            ringtoneUri = reminder.ringtoneUri
                             editingId = reminder.id
                             message = null
                         },
-                        onDelete = {
-                            ReminderScheduler.cancel(context, reminder.id)
-                            store.remove(reminder.id)
-                            refresh()
-                            if (editingId == reminder.id) resetEditor()
-                        }
+                        onDelete = { deleteConfirmation = reminder }
                     )
                     Spacer(Modifier.height(9.dp))
                 }
             }
             Spacer(Modifier.navigationBarsPadding().height(32.dp))
+        }
+        deleteConfirmation?.let { reminder ->
+            AlertDialog(
+                onDismissRequest = { deleteConfirmation = null },
+                title = { Text("Delete reminder?") },
+                text = { Text("\u201c" + reminder.title + "\u201d will be permanently removed.") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        ReminderScheduler.cancel(context, reminder.id)
+                        store.remove(reminder.id)
+                        refresh()
+                        if (editingId == reminder.id) resetEditor()
+                        deleteConfirmation = null
+                    }) { Text("Delete", color = colors.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deleteConfirmation = null }) { Text("Cancel") }
+                }
+            )
         }
     }
 }
@@ -417,13 +481,23 @@ private fun ReminderListItem(
                 LocalTime.of(reminder.hour, reminder.minute).format(DateTimeFormatter.ofPattern("hh:mm a", Locale.getDefault())),
                 color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                TextButton(onClick = onEdit, contentPadding = PaddingValues(0.dp)) {
-                    Text("Edit", color = colors.onSurfaceVariant, fontSize = 12.sp)
-                }
-                TextButton(onClick = onDelete, contentPadding = PaddingValues(0.dp)) {
-                    Text("Delete", color = colors.error, fontSize = 12.sp)
-                }
+            Row(
+                Modifier.clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.045f))
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(
+                    onClick = onEdit,
+                    contentPadding = PaddingValues(horizontal = 9.dp, vertical = 0.dp),
+                    modifier = Modifier.height(30.dp)
+                ) { Text("Edit", color = colors.onSurfaceVariant, fontSize = 12.sp) }
+                TextButton(
+                    onClick = onDelete,
+                    contentPadding = PaddingValues(horizontal = 9.dp, vertical = 0.dp),
+                    modifier = Modifier.height(30.dp)
+                ) { Text("Delete", color = colors.error, fontSize = 12.sp) }
             }
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
