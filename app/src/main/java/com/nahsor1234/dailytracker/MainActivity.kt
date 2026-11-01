@@ -1,6 +1,8 @@
 package com.nahsor1234.dailytracker
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
@@ -60,6 +62,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import java.time.LocalDate
 import java.time.ZoneId
+import java.util.concurrent.Executors
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 
@@ -106,7 +109,51 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate, 
     val colors = MaterialTheme.colorScheme
     var showReminders by rememberSaveable { mutableStateOf(false) }
     var showAccount by rememberSaveable { mutableStateOf(false) }
+    var cloudAccountId by rememberSaveable { mutableStateOf<String?>(null) }
+    var cloudSyncStatus by rememberSaveable { mutableStateOf("") }
+    var syncInProgress by remember { mutableStateOf(false) }
+    val syncWorker = remember(cloud) {
+        Executors.newSingleThreadExecutor { task ->
+            Thread(task, "dailytracker-session-check").apply { isDaemon = true }
+        }
+    }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val focusManager = LocalFocusManager.current
+
+    fun startCloudSync(account: DailyTrackerCloud.Account) {
+        if (!account.verified) {
+            cloudAccountId = null
+            cloudSyncStatus = "Verify your email before cloud sync can start."
+            return
+        }
+        cloudAccountId = account.id
+        if (syncInProgress) return
+        syncInProgress = true
+        cloudSyncStatus = "Syncing daily history..."
+        repository.syncCloud(cloud, account.id) { result ->
+            syncInProgress = false
+            cloudSyncStatus = result.fold(
+                { "Synced " + it + " daily records." },
+                { "Sync failed: " + (it.message ?: "Unknown error.") }
+            )
+        }
+    }
+
+    DisposableEffect(syncWorker) {
+        onDispose { syncWorker.shutdownNow() }
+    }
+
+    LaunchedEffect(cloud) {
+        syncWorker.execute {
+            val result = runCatching { cloud.currentAccount() }
+            mainHandler.post {
+                result.onSuccess { account -> if (account != null) startCloudSync(account) }
+                result.onFailure {
+                    cloudSyncStatus = it.message ?: "Could not restore the cloud session."
+                }
+            }
+        }
+    }
     BackHandler(enabled = showReminders || showAccount) {
         if (showReminders) showReminders = false else showAccount = false
     }
@@ -160,7 +207,18 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate, 
             ) { target ->
                 stateHolder.SaveableStateProvider(target) {
                     when (target) {
-                        TrackerDestination.PROGRESS -> DailyProgressScreen(repository, today)
+                        TrackerDestination.PROGRESS -> DailyProgressScreen(
+                            repository = repository,
+                            today = today,
+                            cloud = cloud,
+                            cloudAccountId = cloudAccountId,
+                            onCloudSyncResult = { result ->
+                                cloudSyncStatus = result.fold(
+                                    { "Synced " + it + " daily records." },
+                                    { "Sync failed: " + (it.message ?: "Unknown error.") }
+                                )
+                            }
+                        )
                         TrackerDestination.TIMER -> TimerScreen()
                     }
                 }
@@ -196,7 +254,16 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate, 
         }
 
         if (showAccount) {
-            CloudAccountDialog(cloud = cloud, onDismiss = { showAccount = false })
+            CloudAccountDialog(
+                cloud = cloud,
+                syncStatus = cloudSyncStatus,
+                onSignedIn = ::startCloudSync,
+                onSignedOut = {
+                    cloudAccountId = null
+                    cloudSyncStatus = "Signed out. Local history remains on this device."
+                },
+                onDismiss = { showAccount = false }
+            )
         }
 
         AnimatedVisibility(
