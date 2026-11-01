@@ -71,6 +71,7 @@ import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle as JavaTextStyle
 import java.time.temporal.WeekFields
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val MAX_DESCRIPTION_LENGTH = 5_000
 
@@ -100,6 +101,12 @@ internal fun DailyProgressScreen(
     var loadFailed by remember { mutableStateOf(false) }
     var saveState by remember { mutableStateOf(SaveState.IDLE) }
     var saveRevision by remember { mutableIntStateOf(0) }
+    var cloudSyncRevision by remember { mutableIntStateOf(0) }
+    val screenActive = remember { AtomicBoolean(true) }
+
+    DisposableEffect(Unit) {
+        onDispose { screenActive.set(false) }
+    }
 
     LaunchedEffect(today) {
         displayedMonth = YearMonth.from(today)
@@ -141,6 +148,17 @@ internal fun DailyProgressScreen(
         onDispose { active = false }
     }
 
+    LaunchedEffect(cloudSyncRevision) {
+        if (cloudSyncRevision > 0) {
+            repository.loadEntry(selectedDate) { result ->
+                if (screenActive.get()) result.onSuccess { selectedEntry = it }
+            }
+            repository.loadCompletedDates(displayedMonth) { result ->
+                if (screenActive.get()) result.onSuccess { completedDates = it }
+            }
+        }
+    }
+
     fun save(updatedEntry: DailyEntry) {
         selectedEntry = updatedEntry
         saveState = SaveState.SAVING
@@ -152,7 +170,12 @@ internal fun DailyProgressScreen(
                 saveState = if (result.isSuccess) SaveState.SAVED else SaveState.FAILED
             }
             if (result.isSuccess && cloudAccountId != null) {
-                repository.syncCloud(cloud, cloudAccountId, onCloudSyncResult)
+                repository.syncCloud(cloud, cloudAccountId) { syncResult ->
+                    onCloudSyncResult(syncResult)
+                    if (syncResult.isSuccess && screenActive.get()) {
+                        cloudSyncRevision += 1
+                    }
+                }
             }
             if (result.isSuccess && YearMonth.from(updatedEntry.date) == displayedMonth) {
                 completedDates = if (updatedEntry.completed) {
