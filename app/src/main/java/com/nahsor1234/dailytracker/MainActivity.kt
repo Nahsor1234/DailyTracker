@@ -3,6 +3,7 @@ package com.nahsor1234.dailytracker
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
@@ -98,6 +99,7 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate) 
     val stateHolder = rememberSaveableStateHolder()
     val colors = MaterialTheme.colorScheme
     var showReminders by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = showReminders) { showReminders = false }
 
     AnimatedContent(
         targetState = showReminders,
