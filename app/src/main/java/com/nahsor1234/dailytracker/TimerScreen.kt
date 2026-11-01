@@ -298,7 +298,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.navigationBarsPadding().height(120.dp))
         }
     }
 }
