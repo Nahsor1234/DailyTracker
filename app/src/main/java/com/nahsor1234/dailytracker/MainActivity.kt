@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -28,6 +29,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalFocusManager
 import kotlin.math.PI
 import kotlin.math.sin
 import androidx.compose.foundation.Canvas
@@ -46,6 +48,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
@@ -99,77 +102,97 @@ private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate) 
     val stateHolder = rememberSaveableStateHolder()
     val colors = MaterialTheme.colorScheme
     var showReminders by rememberSaveable { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
     BackHandler(enabled = showReminders) { showReminders = false }
 
-    AnimatedContent(
-        targetState = showReminders,
-        modifier = Modifier.fillMaxSize(),
-        transitionSpec = {
-            if (targetState) {
-                (scaleIn(initialScale = 0.94f, animationSpec = tween(260, easing = FastOutSlowInEasing)) +
-                    fadeIn(tween(180))) togetherWith
-                    (scaleOut(targetScale = 1.02f, animationSpec = tween(260, easing = FastOutSlowInEasing)) +
-                        fadeOut(tween(180)))
-            } else {
-                (scaleIn(initialScale = 1.02f, animationSpec = tween(260, easing = FastOutSlowInEasing)) +
-                    fadeIn(tween(180))) togetherWith
-                    (scaleOut(targetScale = 0.94f, animationSpec = tween(260, easing = FastOutSlowInEasing)) +
-                        fadeOut(tween(180)))
-            }
-        },
-        label = "reminders-zoom"
-    ) { remindersVisible ->
-        if (remindersVisible) {
-            ReminderScreen(onBack = { showReminders = false })
-        } else {
+    // The main UI is composed once and stays composed while Reminders is open; only its zoom and
+    // fade change. Swapping it out with AnimatedContent disposes the whole Progress screen
+    // (calendar, month strip, database-backed state, nav bar entrance) and rebuilds it from
+    // scratch inside the zoom-out transition, which is what made returning to Progress stutter.
+    // Progress state (selected day, month) is also kept now instead of resetting to today.
+    // The animated values are only read inside graphicsLayer, so no recomposition per frame.
+    val mainScale by animateFloatAsState(
+        targetValue = if (showReminders) 1.02f else 1f,
+        animationSpec = tween(260, easing = FastOutSlowInEasing),
+        label = "main-zoom"
+    )
+    val mainAlpha by animateFloatAsState(
+        targetValue = if (showReminders) 0f else 1f,
+        animationSpec = tween(180),
+        label = "main-fade"
+    )
+
     Box(Modifier.fillMaxSize().background(colors.background)) {
-        // Pre-composes the Timer screen off-screen so the first Progress -> Timer slide is smooth.
-        TimerScreenWarmUp(
-            enabled = destination == TrackerDestination.PROGRESS,
-            modifier = Modifier.fillMaxSize().statusBarsPadding()
-        )
-        AnimatedContent(
-            targetState = destination,
-            modifier = Modifier.fillMaxSize().statusBarsPadding(),
-            transitionSpec = {
-                if (targetState == TrackerDestination.TIMER) {
-                    (slideInHorizontally(tween(300)) { it } + fadeIn(tween(180))) togetherWith
-                        (slideOutHorizontally(tween(300)) { -it / 3 } + fadeOut(tween(180)))
-                } else {
-                    (slideInHorizontally(tween(300)) { -it } + fadeIn(tween(180))) togetherWith
-                        (slideOutHorizontally(tween(300)) { it / 3 } + fadeOut(tween(180)))
+        Box(
+            Modifier.fillMaxSize()
+                .graphicsLayer {
+                    scaleX = mainScale
+                    scaleY = mainScale
+                    alpha = mainAlpha
                 }
-            },
-            label = "screen-slide"
-        ) { target ->
-            stateHolder.SaveableStateProvider(target) {
-                when (target) {
-                    TrackerDestination.PROGRESS -> DailyProgressScreen(repository, today)
-                    TrackerDestination.TIMER -> TimerScreen()
+                // While Reminders covers it, keep the hidden UI out of accessibility.
+                .then(if (showReminders) Modifier.clearAndSetSemantics { } else Modifier)
+        ) {
+            // Pre-composes the Timer screen off-screen so the first Progress -> Timer slide is smooth.
+            TimerScreenWarmUp(
+                enabled = destination == TrackerDestination.PROGRESS,
+                modifier = Modifier.fillMaxSize().statusBarsPadding()
+            )
+            AnimatedContent(
+                targetState = destination,
+                modifier = Modifier.fillMaxSize().statusBarsPadding(),
+                transitionSpec = {
+                    if (targetState == TrackerDestination.TIMER) {
+                        (slideInHorizontally(tween(300)) { it } + fadeIn(tween(180))) togetherWith
+                            (slideOutHorizontally(tween(300)) { -it / 3 } + fadeOut(tween(180)))
+                    } else {
+                        (slideInHorizontally(tween(300)) { -it } + fadeIn(tween(180))) togetherWith
+                            (slideOutHorizontally(tween(300)) { it / 3 } + fadeOut(tween(180)))
+                    }
+                },
+                label = "screen-slide"
+            ) { target ->
+                stateHolder.SaveableStateProvider(target) {
+                    when (target) {
+                        TrackerDestination.PROGRESS -> DailyProgressScreen(repository, today)
+                        TrackerDestination.TIMER -> TimerScreen()
+                    }
                 }
             }
-        }
-        val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-        Box(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(150.dp + navInset)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color.Transparent, colors.background.copy(alpha = 0.88f), colors.background)
+            val navInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+            Box(
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(150.dp + navInset)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, colors.background.copy(alpha = 0.88f), colors.background)
+                        )
                     )
-                )
-        )
-        FloatingNavigationBar(
-            selected = destination,
-            onSelect = { destination = it },
-            modifier = Modifier.align(Alignment.BottomCenter)
-                .navigationBarsPadding().padding(bottom = 10.dp)
-        )
-        ReminderEntryButton(
-            onClick = { showReminders = true },
-            modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding()
-                .padding(top = 12.dp, end = 16.dp)
-        )
-    }
+            )
+            FloatingNavigationBar(
+                selected = destination,
+                onSelect = { destination = it },
+                modifier = Modifier.align(Alignment.BottomCenter)
+                    .navigationBarsPadding().padding(bottom = 10.dp)
+            )
+            ReminderEntryButton(
+                onClick = {
+                    // The UI underneath stays composed, so drop focus (and the keyboard) explicitly.
+                    focusManager.clearFocus()
+                    showReminders = true
+                },
+                modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding()
+                    .padding(top = 12.dp, end = 16.dp)
+            )
+        }
+
+        AnimatedVisibility(
+            visible = showReminders,
+            enter = scaleIn(initialScale = 0.94f, animationSpec = tween(260, easing = FastOutSlowInEasing)) +
+                fadeIn(tween(180)),
+            exit = scaleOut(targetScale = 0.94f, animationSpec = tween(260, easing = FastOutSlowInEasing)) +
+                fadeOut(tween(180))
+        ) {
+            ReminderScreen(onBack = { showReminders = false })
         }
     }
 }
