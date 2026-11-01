@@ -41,6 +41,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -509,6 +511,7 @@ private fun TimerControls(
     onReset: () -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
+    val haptics = LocalHapticFeedback.current
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(28.dp)
@@ -516,7 +519,10 @@ private fun TimerControls(
         Box(
             Modifier.size(64.dp).alpha(if (canReset) 1f else 0.35f).clip(CircleShape)
                 .border(1.dp, Color.White.copy(alpha = 0.14f), CircleShape)
-                .clickable(enabled = canReset, onClick = onReset),
+                .clickable(enabled = canReset) {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onReset()
+                },
             contentAlignment = Alignment.Center
         ) {
             Text("Reset", color = colors.onSurfaceVariant, style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium))
@@ -524,7 +530,10 @@ private fun TimerControls(
         Box(
             Modifier.size(88.dp).alpha(if (startEnabled) 1f else 0.35f).clip(CircleShape)
                 .background(colors.primary)
-                .clickable(enabled = startEnabled, onClick = onStartPause),
+                .clickable(enabled = startEnabled) {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onStartPause()
+                },
             contentAlignment = Alignment.Center
         ) {
             Crossfade(isRunning, animationSpec = tween(160), label = "play-pause") { running ->

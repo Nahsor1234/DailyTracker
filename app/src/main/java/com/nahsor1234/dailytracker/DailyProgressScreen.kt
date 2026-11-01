@@ -55,6 +55,8 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -194,6 +196,7 @@ internal fun DailyProgressScreen(
     val todayFormatter = remember(locale) { DateTimeFormatter.ofPattern("EEE, d MMM", locale) }
     val monthNameFormatter = remember(locale) { DateTimeFormatter.ofPattern("MMMM", locale) }
     val primary = MaterialTheme.colorScheme.primary
+    val haptics = LocalHapticFeedback.current
 
     Surface(
         modifier = modifier.fillMaxSize(),
@@ -250,7 +253,10 @@ internal fun DailyProgressScreen(
                             selectedDate.dayOfMonth.coerceAtMost(target.lengthOfMonth())
                         )
                     },
-                    onSelectDate = { selectedDate = it }
+                    onSelectDate = {
+                        if (it != selectedDate) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        selectedDate = it
+                    }
                 )
 
                 Spacer(Modifier.height(28.dp))
@@ -715,6 +721,7 @@ private fun TodayEditor(
 @Composable
 private fun CompletionToggle(completed: Boolean, onChange: (Boolean) -> Unit) {
     val scheme = MaterialTheme.colorScheme
+    val haptics = LocalHapticFeedback.current
     val check = remember { Animatable(if (completed) 1f else 0f) }
     val burst = remember { Animatable(1f) } // 1f = finished, nothing visible
     var previous by remember { mutableStateOf(completed) }
@@ -732,7 +739,14 @@ private fun CompletionToggle(completed: Boolean, onChange: (Boolean) -> Unit) {
 
     Row(
         Modifier.fillMaxWidth()
-            .toggleable(value = completed, role = Role.Checkbox, onValueChange = onChange),
+            .toggleable(
+                value = completed,
+                role = Role.Checkbox,
+                onValueChange = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onChange(it)
+                }
+            ),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(Modifier.size(64.dp)) {
@@ -820,7 +834,7 @@ private fun DescriptionField(value: String, onValueChange: (String) -> Unit) {
 
     Column {
         Box(
-            Modifier.fillMaxWidth().heightIn(min = 128.dp)
+            Modifier.fillMaxWidth().heightIn(min = 168.dp)
                 .clip(shape)
                 .background(Color.Black.copy(alpha = 0.18f))
                 .border(1.dp, borderColor, shape)
