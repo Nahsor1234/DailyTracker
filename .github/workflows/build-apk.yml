@@ -59,8 +59,13 @@ jobs:
         run: |
           set -euo pipefail
           APK="app/build/outputs/apk/debug/app-debug.apk"
-          apksigner verify --verbose "$APK"
-          ACTUAL_FINGERPRINT=$(apksigner verify --print-certs "$APK" | awk -F': ' '/certificate SHA-256 digest:/{gsub(/:/, "", $2); print tolower($2); exit}')
+          APKSIGNER="${ANDROID_HOME}/build-tools/35.0.0/apksigner"
+          if [ ! -x "$APKSIGNER" ]; then
+            echo "::error::apksigner not found at $APKSIGNER"
+            exit 1
+          fi
+          "$APKSIGNER" verify --verbose "$APK"
+          ACTUAL_FINGERPRINT=$("$APKSIGNER" verify --print-certs "$APK" | awk -F': ' '/certificate SHA-256 digest:/{gsub(/:/, "", $2); print tolower($2); exit}')
           EXPECTED_FINGERPRINT="ce52869bcaee870060f44df125e79f6079e9e67e3a69fdf1ecb926b9cd381c94"
           if [ "$ACTUAL_FINGERPRINT" != "$EXPECTED_FINGERPRINT" ]; then
             echo "::error::APK was not signed with the permanent DailyTracker key."
