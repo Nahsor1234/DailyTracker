@@ -10,6 +10,7 @@ import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
 import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
 
 /**
  * Records are keyed by the user's local calendar date (yyyy-MM-dd).
@@ -23,9 +24,13 @@ internal data class DailyEntry(
 
 internal class DailyEntryRepository(context: Context) {
 
-    private val database = DailyEntryOpenHelper(context.applicationContext)
+    private val appContext = context.applicationContext
+    private val database = DailyEntryOpenHelper(appContext)
     private val executor = Executors.newSingleThreadExecutor { task ->
         Thread(task, "dailytracker-database").apply { isDaemon = true }
+    }
+    private val syncExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "dailytracker-cloud-sync").apply { isDaemon = true }
     }
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -113,6 +118,123 @@ internal class DailyEntryRepository(context: Context) {
         }
     }
 
+    /**
+     * Performs a two-way merge on the database executor. Existing local history is associated
+     * with the first account used on this installation; a different account is blocked to
+     * prevent accidentally uploading one person's local records into another account.
+     */
+    fun syncCloud(
+        cloud: DailyTrackerCloud,
+        accountId: String,
+        onResult: (Result<Int>) -> Unit
+    ) {
+        // Network requests run on a separate queue so a slow connection cannot block
+        // local entry reads or saves on the database executor.
+        syncExecutor.execute {
+            val result = runCatching {
+                require(accountId.isNotBlank()) { "A valid account is required to sync." }
+                val binding = appContext.getSharedPreferences(CLOUD_BINDING_PREFS, Context.MODE_PRIVATE)
+                val existingOwner = binding.getString(CLOUD_OWNER_KEY, null)
+                require(existingOwner == null || existingOwner == accountId) {
+                    "This device's local history is linked to a different account. No records were synced."
+                }
+
+                if (existingOwner == null) {
+                    // Persist the account binding before any cloud write so a process death
+                    // cannot leave uploaded local history unassociated with its owner.
+                    check(binding.edit().putString(CLOUD_OWNER_KEY, accountId).commit()) {
+                        "The local account association could not be saved."
+                    }
+                }
+
+                val localEntries = runOnDatabaseExecutor { readAllCloudEntries() }
+                val localByDate = localEntries.associateBy { it.date }
+                val mergedEntries = cloud.sync(localEntries)
+
+                runOnDatabaseExecutor {
+                    val currentLocalByDate = readAllCloudEntries().associateBy { it.date }
+                    val writable = database.writableDatabase
+                    writable.beginTransaction()
+                    try {
+                        for (entry in mergedEntries) {
+                            val snapshotEntry = localByDate[entry.date]
+                            val currentEntry = currentLocalByDate[entry.date]
+                            val shouldApply = when {
+                                currentEntry == null -> true
+                                currentEntry == snapshotEntry -> true
+                                currentEntry.updatedAt < entry.updatedAt -> true
+                                else -> false
+                            }
+                            if (!shouldApply || currentEntry == entry) continue
+
+                            val values = ContentValues().apply {
+                                put(COLUMN_LOCAL_DATE, entry.date.toString())
+                                put(COLUMN_COMPLETED, if (entry.completed) 1 else 0)
+                                put(COLUMN_DESCRIPTION, entry.description)
+                                put(COLUMN_UPDATED_AT, entry.updatedAt)
+                                put(COLUMN_TIME_ZONE, entry.timeZoneId)
+                            }
+                            val rowId = writable.insertWithOnConflict(
+                                TABLE_DAILY_ENTRIES,
+                                null,
+                                values,
+                                SQLiteDatabase.CONFLICT_REPLACE
+                            )
+                            check(rowId != -1L) {
+                                "A cloud record could not be saved to local storage."
+                            }
+                        }
+                        writable.setTransactionSuccessful()
+                    } finally {
+                        writable.endTransaction()
+                    }
+                }
+
+                mergedEntries.size
+            }
+            mainHandler.post { onResult(result) }
+        }
+    }
+
+    private fun <T> runOnDatabaseExecutor(block: () -> T): T {
+        val task = FutureTask<T> { block() }
+        executor.execute(task)
+        return task.get()
+    }
+
+    private fun readAllCloudEntries(): List<DailyTrackerCloud.CloudEntry> {
+        val cursor = database.readableDatabase.query(
+            TABLE_DAILY_ENTRIES,
+            arrayOf(
+                COLUMN_LOCAL_DATE,
+                COLUMN_COMPLETED,
+                COLUMN_DESCRIPTION,
+                COLUMN_UPDATED_AT,
+                COLUMN_TIME_ZONE
+            ),
+            null,
+            null,
+            null,
+            null,
+            "$COLUMN_LOCAL_DATE ASC"
+        )
+        return cursor.use {
+            buildList {
+                while (it.moveToNext()) {
+                    add(
+                        DailyTrackerCloud.CloudEntry(
+                            date = LocalDate.parse(it.getString(0)),
+                            completed = it.getInt(1) == 1,
+                            description = it.getString(2).orEmpty(),
+                            updatedAt = it.getLong(3),
+                            timeZoneId = it.getString(4).orEmpty().ifBlank { "UTC" }
+                        )
+                    )
+                }
+            }
+        }
+    }
+
     private class DailyEntryOpenHelper(context: Context) : SQLiteOpenHelper(
         context,
         DATABASE_NAME,
@@ -149,5 +271,7 @@ internal class DailyEntryRepository(context: Context) {
         const val COLUMN_DESCRIPTION = "description"
         const val COLUMN_UPDATED_AT = "updated_at_epoch_ms"
         const val COLUMN_TIME_ZONE = "time_zone_id"
+        const val CLOUD_BINDING_PREFS = "dailytracker_cloud_binding"
+        const val CLOUD_OWNER_KEY = "user_id"
     }
 }

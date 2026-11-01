@@ -16,8 +16,6 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-private const val AUTH_REDIRECT_URI = "com.nahsor1234.dailytracker://auth/callback"
-
 /**
  * Small REST client for Supabase Auth and PostgREST.
  * All methods are blocking and must be called from a worker thread.
@@ -47,6 +45,7 @@ internal class DailyTrackerCloud(context: Context) {
         val verified: Boolean
     )
 
+    @Synchronized
     fun currentAccount(): Account? {
         val saved = storage.read() ?: return null
         return if (saved.expiresAt > Instant.now().epochSecond + 60) {
@@ -58,6 +57,7 @@ internal class DailyTrackerCloud(context: Context) {
         }
     }
 
+    @Synchronized
     fun signUp(email: String, password: String) {
         val response = request(
             "POST",
@@ -69,6 +69,7 @@ internal class DailyTrackerCloud(context: Context) {
         if (response.optString("access_token").isNotBlank()) saveSession(response)
     }
 
+    @Synchronized
     fun signIn(email: String, password: String): Account {
         val response = request(
             "POST",
@@ -82,6 +83,7 @@ internal class DailyTrackerCloud(context: Context) {
         }
     }
 
+    @Synchronized
     fun resendVerification(email: String) {
         request(
             "POST",
@@ -91,6 +93,7 @@ internal class DailyTrackerCloud(context: Context) {
         )
     }
 
+    @Synchronized
     fun requestPasswordReset(email: String) {
         request(
             "POST",
@@ -100,6 +103,7 @@ internal class DailyTrackerCloud(context: Context) {
         )
     }
 
+    @Synchronized
     fun signOut() {
         if (storage.read() != null) {
             runCatching {
@@ -109,7 +113,14 @@ internal class DailyTrackerCloud(context: Context) {
         storage.clear()
     }
 
+    @Synchronized
     fun acceptAuthCallback(uri: Uri): AuthCallback {
+        require(
+            uri.scheme == "com.nahsor1234.dailytracker" &&
+                uri.host == "auth" &&
+                uri.path == "/callback"
+        ) { "This is not a DailyTracker authentication callback." }
+
         val parameters = mutableMapOf<String, String>()
         listOfNotNull(uri.encodedQuery, uri.encodedFragment).forEach { encoded ->
             encoded.split("&").forEach { part ->
@@ -173,6 +184,7 @@ internal class DailyTrackerCloud(context: Context) {
         return AuthCallback(type, Account(session.userId, session.email, session.verified))
     }
 
+    @Synchronized
     fun updatePassword(newPassword: String): Account {
         require(newPassword.length >= 6) { "Password must contain at least 6 characters." }
         request(
@@ -188,6 +200,7 @@ internal class DailyTrackerCloud(context: Context) {
      * Merge records by local_date. The newest updated_at wins; an exact timestamp tie
      * preserves the remote record. RLS scopes all reads and writes to the active user.
      */
+    @Synchronized
     fun sync(localEntries: List<CloudEntry>): List<CloudEntry> {
         val account = currentAccount() ?: error("Your session has expired. Sign in again.")
         require(account.verified) { "Verify your email before syncing DailyTracker data." }
@@ -350,6 +363,10 @@ internal class DailyTrackerCloud(context: Context) {
         } finally {
             connection.disconnect()
         }
+    }
+
+    private companion object {
+        const val AUTH_REDIRECT_URI = "com.nahsor1234.dailytracker://auth/callback"
     }
 }
 

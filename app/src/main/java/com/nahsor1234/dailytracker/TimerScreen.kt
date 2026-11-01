@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.LocalSaveableStateRegistry
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,7 +38,9 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -57,16 +60,23 @@ private enum class TimerMode { STOPWATCH, COUNTDOWN }
 private const val DEFAULT_COUNTDOWN_MINUTES = 25L
 private const val MAX_COUNTDOWN_MINUTES = 599L
 private val DurationPresets = listOf(5, 15, 25, 45, 60)
+private val ModeSegmentWidth = 120.dp // (248dp pill - 2 * 4dp padding) / 2 segments
 
 // ---------------------------------------------------------------------------------------------
-// Dot field: concentric rings of dots. Countdown dissolves them outside-in, the stopwatch
-// lights them inside-out once per minute. Positions are precomputed once, nothing is simulated.
+// Dot field: concentric rings of dots that alternate between disappearing (outside-in) and
+// reappearing (inside-out) in consecutive one-minute phases. The countdown starts with a
+// disappearing phase, the stopwatch with an appearing one. The phase is a pure function of the
+// elapsed time, so nothing is simulated and no separate animation clock is involved.
 // ---------------------------------------------------------------------------------------------
 
 private const val FIELD_RINGS = 12
 private const val FRONT_WIDTH = 0.05f
+private const val PHASE_MILLIS = 60_000L
 
 private class Dot(val x: Float, val y: Float, val rho: Float, val seed: Float)
+
+/** Built once per process and shared by every dot field. */
+private val DotLayout: List<Dot> by lazy { buildDotField(FIELD_RINGS) }
 
 private fun buildDotField(rings: Int): List<Dot> = buildList {
     add(Dot(0f, 0f, 0f, 0.5f))
@@ -98,16 +108,33 @@ private fun dotLevel(dot: Dot, progress: Float, dissolving: Boolean): Float =
         ((progress - threshold) / FRONT_WIDTH).coerceIn(0f, 1f)
     }
 
+/** Position (0..1) inside the current one-minute phase. */
+private fun phaseProgress(elapsedMillis: Long): Float =
+    (elapsedMillis.coerceAtLeast(0L) % PHASE_MILLIS).toFloat() / PHASE_MILLIS
+
+/**
+ * Whether the current one-minute phase makes dots disappear. Phases alternate every minute and
+ * [dissolveFirst] sets the direction of the first one. Both curves in [dotLevel] end a phase in
+ * exactly the state the opposite curve starts from (every dot gone, or every dot present), so
+ * consecutive phases join without a jump.
+ */
+private fun phaseDissolves(elapsedMillis: Long, dissolveFirst: Boolean): Boolean {
+    val inEvenPhase = (elapsedMillis.coerceAtLeast(0L) / PHASE_MILLIS) % 2L == 0L
+    return inEvenPhase == dissolveFirst
+}
+
 @Composable
 private fun DotField(
-    progress: Float,
-    dissolving: Boolean,
+    elapsedMillis: Long,
+    dissolveFirst: Boolean,
     running: Boolean,
     finished: Boolean,
     modifier: Modifier = Modifier
 ) {
     val colors = MaterialTheme.colorScheme
-    val dots = remember { buildDotField(FIELD_RINGS) }
+    val dots = DotLayout
+    val progress = phaseProgress(elapsedMillis)
+    val dissolving = phaseDissolves(elapsedMillis, dissolveFirst)
     val pulse by rememberInfiniteTransition(label = "finish-pulse").animateFloat(
         initialValue = 0.05f,
         targetValue = 0.55f,
@@ -152,6 +179,48 @@ private fun DotField(
 // Screen
 // ---------------------------------------------------------------------------------------------
 
+private const val WARM_UP_DELAY_MS = 700L // after the launch animations of the Progress screen
+private const val WARM_UP_FRAMES = 3
+private var timerWarmedUp = false // per process; only touched from the main thread
+
+/**
+ * Composes the Timer screen once, off-screen, while the user is still looking at Progress.
+ *
+ * The first composition of a screen in a fresh process is slow (class loading, first layout and
+ * draw of every widget), and without this that cost lands inside the first slide transition,
+ * which shows up as a stutter. Paying it here, while nothing is animating, makes the first
+ * navigation as smooth as the later ones. The copy is moved fully out of view, hidden from
+ * accessibility, kept out of saved state and removed after a few frames.
+ */
+@Composable
+internal fun TimerScreenWarmUp(enabled: Boolean, modifier: Modifier = Modifier) {
+    var active by remember { mutableStateOf(false) }
+
+    LaunchedEffect(enabled) {
+        if (!enabled || timerWarmedUp) return@LaunchedEffect
+        delay(WARM_UP_DELAY_MS)
+        try {
+            active = true
+            repeat(WARM_UP_FRAMES) { withFrameNanos { } }
+            timerWarmedUp = true
+        } finally {
+            active = false
+        }
+    }
+
+    if (active) {
+        CompositionLocalProvider(LocalSaveableStateRegistry provides null) {
+            Box(
+                modifier
+                    .clearAndSetSemantics { }
+                    .graphicsLayer { translationX = size.width }
+            ) {
+                TimerScreen()
+            }
+        }
+    }
+}
+
 @Composable
 internal fun TimerScreen(modifier: Modifier = Modifier) {
     var mode by rememberSaveable { mutableStateOf(TimerMode.STOPWATCH) }
@@ -190,9 +259,6 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
         (minutesText.toLongOrNull()?.takeIf { it in 1L..MAX_COUNTDOWN_MINUTES } ?: 0L) * 60_000L
     }
     val countdownElapsed = (configuredMillis - remaining).coerceIn(0L, configuredMillis)
-    val countdownProgress = if (configuredMillis > 0L)
-        (countdownElapsed.toFloat() / configuredMillis).coerceIn(0f, 1f) else 0f
-    val stopwatchProgress = (watchElapsed % 60_000L) / 60_000f
 
     val onMinutesChange: (String) -> Unit = { input ->
         minutesText = input
@@ -217,8 +283,8 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
 
             if (mode == TimerMode.STOPWATCH) {
                 DotField(
-                    progress = stopwatchProgress,
-                    dissolving = false,
+                    elapsedMillis = watchElapsed,
+                    dissolveFirst = false,
                     running = watchRunning,
                     finished = false,
                     modifier = Modifier.size(296.dp)
@@ -236,7 +302,11 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
                             watchStartedAt = 0L
                             watchRunning = false
                         } else {
-                            watchStartedAt = SystemClock.elapsedRealtime()
+                            // Refresh the shared clock too, otherwise the first frame after a long
+                            // pause is drawn from a stale `now`.
+                            val startedAt = SystemClock.elapsedRealtime()
+                            now = startedAt
+                            watchStartedAt = startedAt
                             watchRunning = true
                         }
                     },
@@ -248,8 +318,8 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
                 )
             } else {
                 DotField(
-                    progress = countdownProgress,
-                    dissolving = true,
+                    elapsedMillis = countdownElapsed,
+                    dissolveFirst = true,
                     running = countdownRunning,
                     finished = finished,
                     modifier = Modifier.size(296.dp)
@@ -276,7 +346,9 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
                             countdownDeadline = 0L
                             countdownRunning = false
                         } else if (remainingBase > 0L) {
-                            countdownDeadline = SystemClock.elapsedRealtime() + remainingBase
+                            val startedAt = SystemClock.elapsedRealtime()
+                            now = startedAt
+                            countdownDeadline = startedAt + remainingBase
                             finished = false
                             countdownRunning = true
                         }
@@ -335,11 +407,13 @@ private fun TimeReadout(main: String, tenths: String?, status: String) {
 private fun TimerModeSelector(mode: TimerMode, onModeChange: (TimerMode) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val selectedIndex = if (mode == TimerMode.STOPWATCH) 0 else 1
-    BoxWithConstraints(
+    // The pill has a fixed size, so no BoxWithConstraints (a subcomposing layout, which is
+    // noticeably costly the first time it is composed) is needed to know the segment width.
+    Box(
         Modifier.width(248.dp).height(44.dp).clip(CircleShape)
             .border(1.dp, Color.White.copy(alpha = 0.10f), CircleShape).padding(4.dp)
     ) {
-        val segment = maxWidth / 2
+        val segment = ModeSegmentWidth
         val offset by animateDpAsState(segment * selectedIndex, tween(320), label = "mode-pill")
         Box(
             Modifier.offset(x = offset).width(segment).fillMaxHeight()
