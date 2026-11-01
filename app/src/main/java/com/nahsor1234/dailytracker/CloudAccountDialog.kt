@@ -146,6 +146,16 @@ internal fun CloudAccountDialog(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                    Text(
+                        "The first account used on this device is linked to its local history. Other accounts cannot sync this device's records.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (account!!.verified) {
+                        TextButton(onClick = { onSignedIn(account!!) }, enabled = !busy) {
+                            Text("Sync now")
+                        }
+                    }
                 } else {
                     OutlinedTextField(
                         value = email,
