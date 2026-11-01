@@ -1,5 +1,7 @@
 package com.nahsor1234.dailytracker
 
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -7,105 +9,252 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 @Composable
 internal fun CloudAccountDialog(
     cloud: DailyTrackerCloud,
+    syncStatus: String,
+    onSignedIn: (DailyTrackerCloud.Account) -> Unit,
     onDismiss: () -> Unit
 ) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
+    var messageIsError by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(true) }
     var account by remember { mutableStateOf<DailyTrackerCloud.Account?>(null) }
-    val worker = remember { Executors.newSingleThreadExecutor() }
 
-    LaunchedEffect(cloud) {
-        worker.execute {
-            val result = runCatching { cloud.currentAccount() }.getOrNull()
-            account = result
+    val worker = remember(cloud) {
+        Executors.newSingleThreadExecutor { task ->
+            Thread(task, "dailytracker-auth").apply { isDaemon = true }
+        }
+    }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+    val active = remember { AtomicBoolean(true) }
+
+    DisposableEffect(worker) {
+        onDispose {
+            active.set(false)
+            worker.shutdownNow()
         }
     }
 
+    fun <T> runTask(task: () -> T, onComplete: (Result<T>) -> Unit) {
+        busy = true
+        worker.execute {
+            val result = runCatching(task)
+            mainHandler.post {
+                if (active.get()) {
+                    busy = false
+                    onComplete(result)
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(cloud) {
+        runTask(
+            task = { cloud.currentAccount() },
+            onComplete = { result ->
+                account = result.getOrNull()
+                account?.let(onSignedIn)
+                result.exceptionOrNull()?.let {
+                    message = it.message ?: "Could not read the saved account session."
+                    messageIsError = true
+                }
+            }
+        )
+    }
+
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!busy) onDismiss() },
         title = { Text(if (account == null) "DailyTracker account" else "Account") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (account != null) {
-                    Text(account!!.email)
-                    Text(if (account!!.verified) "Email verified" else "Email verification pending")
-                    Text("Cloud sync is available for this account.")
-                } else {
-                    OutlinedTextField(email, { email = it }, label = { Text("Email") },
-                        singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(password, { password = it }, label = { Text("Password") },
-                        singleLine = true, visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth())
+                if (busy) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
-                if (message.isNotBlank()) Text(message, color = MaterialTheme.colorScheme.error)
+
+                if (account != null) {
+                    Text(account!!.email, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (account!!.verified) "Email verified" else "Email verification pending",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (!account!!.verified) {
+                        TextButton(
+                            onClick = {
+                                runTask(
+                                    task = { cloud.resendVerification(account!!.email) },
+                                    onComplete = { result ->
+                                        message = result.fold(
+                                            { "Verification email requested. Check your inbox." },
+                                            { it.message ?: "Could not resend the verification email." }
+                                        )
+                                        messageIsError = result.isFailure
+                                    }
+                                )
+                            },
+                            enabled = !busy
+                        ) { Text("Resend verification email") }
+                    }
+                    if (syncStatus.isNotBlank()) {
+                        Text(syncStatus, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        Text(
+                            "Your local history will sync with this account.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    OutlinedTextField(
+                        value = email,
+                        onValueChange = { email = it },
+                        label = { Text("Email") },
+                        singleLine = true,
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        label = { Text("Password") },
+                        singleLine = true,
+                        enabled = !busy,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text(
+                        "Use the same account on your other devices to access synced history.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (syncStatus.isNotBlank()) {
+                        Text(syncStatus, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+
+                if (message.isNotBlank()) {
+                    Text(
+                        message,
+                        color = if (messageIsError) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.primary
+                    )
+                }
             }
         },
         confirmButton = {
             if (account != null) {
-                TextButton(onClick = {
-                    busy = true
-                    worker.execute {
-                        val result = runCatching { cloud.signOut() }
-                        busy = false
-                        account = null
-                        message = result.exceptionOrNull()?.message.orEmpty()
-                    }
-                }, enabled = !busy) { Text("Sign out") }
+                TextButton(
+                    onClick = {
+                        runTask(
+                            task = { cloud.signOut() },
+                            onComplete = { result ->
+                                account = null
+                                password = ""
+                                message = result.exceptionOrNull()?.message
+                                    ?: "Signed out. Local history remains on this device."
+                                messageIsError = result.isFailure
+                            }
+                        )
+                    },
+                    enabled = !busy
+                ) { Text("Sign out") }
             } else {
-                TextButton(onClick = {
-                    if (email.isBlank() || password.length < 6) {
-                        message = "Enter a valid email and a password of at least 6 characters."
-                    } else {
-                        busy = true
-                        message = ""
-                        worker.execute {
-                            val result = runCatching { cloud.signIn(email, password) }
-                            account = result.getOrNull()
-                            message = result.exceptionOrNull()?.message
-                                ?: if (account != null) "Signed in." else "Check your email to verify your account."
-                            busy = false
+                TextButton(
+                    onClick = {
+                        if (!email.contains("@") || password.length < 6) {
+                            message = "Enter a valid email and a password of at least 6 characters."
+                            messageIsError = true
+                        } else {
+                            message = ""
+                            runTask(
+                                task = { cloud.signIn(email, password) },
+                                onComplete = { result ->
+                                    result.onSuccess {
+                                        account = it
+                                        message = "Signed in."
+                                        messageIsError = false
+                                        onSignedIn(it)
+                                    }.onFailure {
+                                        message = it.message ?: "Sign-in failed."
+                                        messageIsError = true
+                                    }
+                                }
+                            )
                         }
-                    }
-                }, enabled = !busy) { Text("Sign in") }
+                    },
+                    enabled = !busy
+                ) { Text("Sign in") }
             }
         },
         dismissButton = {
             if (account == null) {
                 Row {
-                    TextButton(onClick = {
-                        if (email.isBlank() || password.length < 6) {
-                            message = "Enter an email and a password of at least 6 characters."
-                        } else {
-                            busy = true
-                            worker.execute {
-                                val result = runCatching { cloud.signUp(email, password) }
-                                message = result.exceptionOrNull()?.message
-                                    ?: "Account created. Check your email for the verification link."
-                                busy = false
+                    TextButton(
+                        onClick = {
+                            if (!email.contains("@") || password.length < 6) {
+                                message = "Enter a valid email and a password of at least 6 characters."
+                                messageIsError = true
+                            } else {
+                                runTask(
+                                    task = { cloud.signUp(email, password) },
+                                    onComplete = { result ->
+                                        message = result.fold(
+                                            { "Account request submitted. Check your email for the verification link, then sign in." },
+                                            { it.message ?: "Account creation failed." }
+                                        )
+                                        messageIsError = result.isFailure
+                                    }
+                                )
                             }
-                        }
-                    }, enabled = !busy) { Text("Create account") }
-                    TextButton(onClick = {
-                        if (email.isBlank()) message = "Enter your email first."
-                        else {
-                            busy = true
-                            worker.execute {
-                                val result = runCatching { cloud.requestPasswordReset(email) }
-                                message = result.exceptionOrNull()?.message
-                                    ?: "Password reset email requested."
-                                busy = false
+                        },
+                        enabled = !busy
+                    ) { Text("Create account") }
+                    TextButton(
+                        onClick = {
+                            if (!email.contains("@")) {
+                                message = "Enter your email first."
+                                messageIsError = true
+                            } else {
+                                runTask(
+                                    task = { cloud.requestPasswordReset(email) },
+                                    onComplete = { result ->
+                                        message = result.fold(
+                                            { "Password reset email requested. Follow the link in your inbox." },
+                                            { it.message ?: "Could not request a password reset." }
+                                        )
+                                        messageIsError = result.isFailure
+                                    }
+                                )
                             }
-                        }
-                    }, enabled = !busy) { Text("Reset password") }
+                        },
+                        enabled = !busy
+                    ) { Text("Reset password") }
+                    TextButton(
+                        onClick = {
+                            if (!email.contains("@")) {
+                                message = "Enter your email first."
+                                messageIsError = true
+                            } else {
+                                runTask(
+                                    task = { cloud.resendVerification(email) },
+                                    onComplete = { result ->
+                                        message = result.fold(
+                                            { "Verification email requested. Check your inbox." },
+                                            { it.message ?: "Could not resend the verification email." }
+                                        )
+                                        messageIsError = result.isFailure
+                                    }
+                                )
+                            }
+                        },
+                        enabled = !busy
+                    ) { Text("Resend email") }
                 }
             } else {
-                TextButton(onClick = onDismiss) { Text("Close") }
+                TextButton(onClick = onDismiss, enabled = !busy) { Text("Close") }
             }
         }
     )
