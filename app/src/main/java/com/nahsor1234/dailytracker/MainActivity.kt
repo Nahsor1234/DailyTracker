@@ -196,7 +196,9 @@ private fun DailyTrackerApp(
         syncWorker.execute {
             val result = runCatching { cloud.currentAccount() }
             mainHandler.post {
-                result.onSuccess { account -> if (account != null) startCloudSync(account) }
+                result.onSuccess {
+                    account -> if (account != null && !passwordRecoveryPending) startCloudSync(account)
+                }
                 result.onFailure {
                     cloudSyncStatus = it.message ?: "Could not restore the cloud session."
                 }
@@ -307,7 +309,9 @@ private fun DailyTrackerApp(
                 cloud = cloud,
                 syncStatus = cloudSyncStatus,
                 passwordRecoveryPending = passwordRecoveryPending,
-                onSignedIn = ::startCloudSync,
+                onSignedIn = { account ->
+                    if (!passwordRecoveryPending) startCloudSync(account)
+                },
                 onPasswordRecoveryComplete = { account ->
                     passwordRecoveryPending = false
                     startCloudSync(account)
