@@ -332,6 +332,7 @@ private fun ParticleTimerDial(
     onReleaseFinished: () -> Unit = {}
 ) {
     val colors = MaterialTheme.colorScheme
+    var particleFrame by remember { mutableIntStateOf(0) }
     LaunchedEffect(emitParticles, releaseParticles) {
         var accumulator = 0f
         while (isActive && (emitParticles || releaseParticles || particles.isNotEmpty())) {
@@ -395,6 +396,7 @@ private fun ParticleTimerDial(
                 }
             }
             if (releaseParticles) particles.removeAll { it.y > 280f }
+            particleFrame++
             delay(16L)
         }
         if (releaseParticles) {
@@ -405,6 +407,7 @@ private fun ParticleTimerDial(
 
     Box(Modifier.size(264.dp), contentAlignment = Alignment.Center) {
         Canvas(Modifier.fillMaxSize().padding(5.dp)) {
+            val currentFrame = particleFrame
             val stroke = 9.dp.toPx()
             val radius = size.minDimension / 2f - stroke / 2f
             drawCircle(colors.surfaceVariant, style = Stroke(stroke))
