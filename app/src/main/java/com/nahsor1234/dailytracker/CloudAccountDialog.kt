@@ -15,12 +15,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal fun CloudAccountDialog(
     cloud: DailyTrackerCloud,
     syncStatus: String,
+    passwordRecoveryPending: Boolean,
     onSignedIn: (DailyTrackerCloud.Account) -> Unit,
+    onPasswordRecoveryComplete: (DailyTrackerCloud.Account) -> Unit,
     onSignedOut: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var newPassword by remember { mutableStateOf("") }
+    var confirmNewPassword by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
     var messageIsError by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(true) }
@@ -70,14 +74,45 @@ internal fun CloudAccountDialog(
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text(if (account == null) "DailyTracker account" else "Account") },
+        title = {
+            Text(
+                when {
+                    passwordRecoveryPending -> "Set a new password"
+                    account == null -> "DailyTracker account"
+                    else -> "Account"
+                }
+            )
+        },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (busy) {
                     LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
 
-                if (account != null) {
+                if (passwordRecoveryPending) {
+                    Text(
+                        account?.email ?: "Choose a new password for your account.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    OutlinedTextField(
+                        value = newPassword,
+                        onValueChange = { newPassword = it },
+                        label = { Text("New password") },
+                        singleLine = true,
+                        enabled = !busy,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = confirmNewPassword,
+                        onValueChange = { confirmNewPassword = it },
+                        label = { Text("Confirm new password") },
+                        singleLine = true,
+                        enabled = !busy,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else if (account != null) {
                     Text(account!!.email, style = MaterialTheme.typography.titleMedium)
                     Text(
                         if (account!!.verified) "Email verified" else "Email verification pending",
@@ -146,7 +181,40 @@ internal fun CloudAccountDialog(
             }
         },
         confirmButton = {
-            if (account != null) {
+            if (passwordRecoveryPending) {
+                TextButton(
+                    onClick = {
+                        when {
+                            newPassword.length < 6 -> {
+                                message = "Password must contain at least 6 characters."
+                                messageIsError = true
+                            }
+                            newPassword != confirmNewPassword -> {
+                                message = "The passwords do not match."
+                                messageIsError = true
+                            }
+                            else -> runTask(
+                                task = { cloud.updatePassword(newPassword) },
+                                onComplete = { result ->
+                                    result.onSuccess {
+                                        account = it
+                                        password = ""
+                                        newPassword = ""
+                                        confirmNewPassword = ""
+                                        message = "Password updated."
+                                        messageIsError = false
+                                        onPasswordRecoveryComplete(it)
+                                    }.onFailure {
+                                        message = it.message ?: "Could not update the password."
+                                        messageIsError = true
+                                    }
+                                }
+                            )
+                        }
+                    },
+                    enabled = !busy
+                ) { Text("Update password") }
+            } else if (account != null) {
                 TextButton(
                     onClick = {
                         runTask(
@@ -192,7 +260,9 @@ internal fun CloudAccountDialog(
             }
         },
         dismissButton = {
-            if (account == null) {
+            if (passwordRecoveryPending) {
+                TextButton(onClick = onDismiss, enabled = !busy) { Text("Close") }
+            } else if (account == null) {
                 Row {
                     TextButton(
                         onClick = {
