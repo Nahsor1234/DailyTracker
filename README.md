@@ -15,10 +15,22 @@ DailyTracker is a standalone Android app for recording daily progress, reviewing
 - Configurable countdown with common duration presets, pause, resume, and reset.
 - Both destinations retain their in-memory screen state while navigating between them.
 - Timer calculations use Android's monotonic elapsed-realtime clock to avoid counter drift.
+- Reminder scheduling with boot/time-zone rescheduling and notification channels.
+- Email/password account creation and sign-in, email verification/resend, password-reset email, and in-app password recovery.
+- Encrypted persistent Supabase sessions backed by Android Keystore.
+- Local-first, two-way daily-history synchronization with timestamp-based conflict resolution.
 
 ## Current implementation stage
 
-Daily Progress and the first timer workflows are implemented. Timer completion currently has an in-app visual state only; background notifications and sound alerts are not configured. Daily records and timer state do not synchronize to Supabase. Authentication, reminders, and cloud synchronization remain later stages.
+Daily Progress, Timer, Reminders, and the first Supabase account/sync workflows are implemented. Daily records remain stored in SQLite and are synchronized with the signed-in user's Supabase daily_progress rows. Sync runs after session restoration, after a successful daily save, and from the Account dialog. Remote-only records are downloaded; the newest updated_at wins, while an exact timestamp tie preserves the server record.
+
+The first account used on an installation is associated with that installation's local history. Signing into a different account does not upload those records to the new account. Signing out does not delete local or cloud records.
+
+Email verification and password recovery use the Android callback URI shown below. Add this exact URI to Supabase Dashboard → Authentication → URL Configuration → Additional Redirect URLs:
+
+com.nahsor1234.dailytracker://auth/callback
+
+This URI must be allow-listed before signup confirmation or password-recovery links can return to the app. The app also needs normal Supabase email delivery configured for the project.
 
 ## Android configuration
 
@@ -46,7 +58,8 @@ gradle wrapper --gradle-version 8.13
 
 ## Data and security notes
 
-- Daily records are stored in the app's private SQLite database.
-- The app does not yet authenticate users or synchronize records to Supabase.
-- No Supabase service-role key or privileged backend secret is embedded in the Android client.
+- SQLite remains the local source of truth; cloud data is merged into it without replacing the database.
+- Supabase access is user-scoped through the existing daily_progress row-level security policies.
+- The Android client contains only the Supabase project URL and publishable key. Never embed a service-role or secret key in the APK.
+- Session tokens are encrypted with AES-GCM using a non-exportable Android Keystore key.
 - Database schema changes must use versioned migrations; existing user records must not be dropped.
