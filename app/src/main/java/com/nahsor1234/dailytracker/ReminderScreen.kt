@@ -164,7 +164,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(22.dp))
 
             BoxWithConstraints(
-                Modifier.fillMaxWidth().clip(CircleShape)
+                Modifier.fillMaxWidth().height(52.dp).clip(CircleShape)
                     .background(Color.White.copy(alpha = 0.045f))
                     .border(1.dp, Color.White.copy(alpha = 0.08f), CircleShape).padding(4.dp)
             ) {
