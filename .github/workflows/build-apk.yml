@@ -2,7 +2,7 @@ name: Build DailyTracker APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, timer-dot-phases-and-nav-warmup]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -33,7 +33,7 @@ jobs:
         with:
           gradle-version: '8.13'
       - name: Load and verify permanent signing key
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main'
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
         run: |
@@ -55,7 +55,7 @@ jobs:
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
       - name: Sign and verify APK
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main'
         run: |
           set -euo pipefail
           APK="app/build/outputs/apk/debug/app-debug.apk"
@@ -108,7 +108,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Publish GitHub prerelease
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: debug-build-${{ github.run_number }}
