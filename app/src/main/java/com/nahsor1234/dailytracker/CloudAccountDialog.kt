@@ -16,6 +16,7 @@ internal fun CloudAccountDialog(
     cloud: DailyTrackerCloud,
     syncStatus: String,
     onSignedIn: (DailyTrackerCloud.Account) -> Unit,
+    onSignedOut: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var email by remember { mutableStateOf("") }
@@ -156,6 +157,7 @@ internal fun CloudAccountDialog(
                                 message = result.exceptionOrNull()?.message
                                     ?: "Signed out. Local history remains on this device."
                                 messageIsError = result.isFailure
+                                if (result.isSuccess) onSignedOut()
                             }
                         )
                     },
