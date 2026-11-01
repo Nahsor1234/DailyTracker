@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -65,8 +66,7 @@ private enum class SaveState {
 }
 
 @Composable
-internal fun DailyProgressScreen(repository: DailyEntryRepository) {
-    val today = remember { LocalDate.now(ZoneId.systemDefault()) }
+internal fun DailyProgressScreen(repository: DailyEntryRepository, today: LocalDate) {
     val locale = remember { Locale.getDefault() }
 
     var displayedMonth by remember { mutableStateOf(YearMonth.from(today)) }
@@ -77,6 +77,11 @@ internal fun DailyProgressScreen(repository: DailyEntryRepository) {
     var loadFailed by remember { mutableStateOf(false) }
     var saveState by remember { mutableStateOf(SaveState.IDLE) }
     var saveRevision by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(today) {
+        displayedMonth = YearMonth.from(today)
+        selectedDate = today
+    }
 
     DisposableEffect(selectedDate) {
         var active = true
@@ -104,6 +109,7 @@ internal fun DailyProgressScreen(repository: DailyEntryRepository) {
 
     DisposableEffect(displayedMonth) {
         var active = true
+        completedDates = emptySet()
         repository.loadCompletedDates(displayedMonth) { result ->
             if (active) {
                 result.onSuccess { completedDates = it }

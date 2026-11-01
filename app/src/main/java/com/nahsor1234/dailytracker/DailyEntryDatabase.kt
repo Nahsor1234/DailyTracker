@@ -88,6 +88,12 @@ internal class DailyEntryRepository(context: Context) {
     fun saveEntry(entry: DailyEntry, onResult: (Result<Unit>) -> Unit) {
         executor.execute {
             val result = runCatching {
+                require(entry.date == LocalDate.now(ZoneId.systemDefault())) {
+                    "Only the current local date can be edited."
+                }
+                require(entry.description.length <= MAX_DESCRIPTION_LENGTH) {
+                    "The daily description exceeds the 5,000-character limit."
+                }
                 val values = ContentValues().apply {
                     put(COLUMN_LOCAL_DATE, entry.date.toString())
                     put(COLUMN_COMPLETED, if (entry.completed) 1 else 0)
@@ -134,6 +140,7 @@ internal class DailyEntryRepository(context: Context) {
     }
 
     private companion object {
+        const val MAX_DESCRIPTION_LENGTH = 5_000
         const val DATABASE_NAME = "dailytracker.db"
         const val DATABASE_VERSION = 1
         const val TABLE_DAILY_ENTRIES = "daily_entries"
