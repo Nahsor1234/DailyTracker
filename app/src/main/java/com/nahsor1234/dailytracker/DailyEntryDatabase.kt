@@ -10,6 +10,7 @@ import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
 import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
 
 /**
  * Records are keyed by the user's local calendar date (yyyy-MM-dd).
@@ -27,6 +28,9 @@ internal class DailyEntryRepository(context: Context) {
     private val database = DailyEntryOpenHelper(appContext)
     private val executor = Executors.newSingleThreadExecutor { task ->
         Thread(task, "dailytracker-database").apply { isDaemon = true }
+    }
+    private val syncExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "dailytracker-cloud-sync").apply { isDaemon = true }
     }
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -124,7 +128,9 @@ internal class DailyEntryRepository(context: Context) {
         accountId: String,
         onResult: (Result<Int>) -> Unit
     ) {
-        executor.execute {
+        // Network requests run on a separate queue so a slow connection cannot block
+        // local entry reads or saves on the database executor.
+        syncExecutor.execute {
             val result = runCatching {
                 require(accountId.isNotBlank()) { "A valid account is required to sync." }
                 val binding = appContext.getSharedPreferences(CLOUD_BINDING_PREFS, Context.MODE_PRIVATE)
@@ -141,41 +147,59 @@ internal class DailyEntryRepository(context: Context) {
                     }
                 }
 
-                val localEntries = readAllCloudEntries()
-                val mergedEntries = cloud.sync(localEntries)
+                val localEntries = runOnDatabaseExecutor { readAllCloudEntries() }
                 val localByDate = localEntries.associateBy { it.date }
+                val mergedEntries = cloud.sync(localEntries)
 
-                val writable = database.writableDatabase
-                writable.beginTransaction()
-                try {
-                    for (entry in mergedEntries) {
-                        if (localByDate[entry.date] == entry) continue
-                        val values = ContentValues().apply {
-                            put(COLUMN_LOCAL_DATE, entry.date.toString())
-                            put(COLUMN_COMPLETED, if (entry.completed) 1 else 0)
-                            put(COLUMN_DESCRIPTION, entry.description)
-                            put(COLUMN_UPDATED_AT, entry.updatedAt)
-                            put(COLUMN_TIME_ZONE, entry.timeZoneId)
+                runOnDatabaseExecutor {
+                    val currentLocalByDate = readAllCloudEntries().associateBy { it.date }
+                    val writable = database.writableDatabase
+                    writable.beginTransaction()
+                    try {
+                        for (entry in mergedEntries) {
+                            val snapshotEntry = localByDate[entry.date]
+                            val currentEntry = currentLocalByDate[entry.date]
+                            val shouldApply = when {
+                                currentEntry == null -> true
+                                currentEntry == snapshotEntry -> true
+                                currentEntry.updatedAt < entry.updatedAt -> true
+                                else -> false
+                            }
+                            if (!shouldApply || currentEntry == entry) continue
+
+                            val values = ContentValues().apply {
+                                put(COLUMN_LOCAL_DATE, entry.date.toString())
+                                put(COLUMN_COMPLETED, if (entry.completed) 1 else 0)
+                                put(COLUMN_DESCRIPTION, entry.description)
+                                put(COLUMN_UPDATED_AT, entry.updatedAt)
+                                put(COLUMN_TIME_ZONE, entry.timeZoneId)
+                            }
+                            val rowId = writable.insertWithOnConflict(
+                                TABLE_DAILY_ENTRIES,
+                                null,
+                                values,
+                                SQLiteDatabase.CONFLICT_REPLACE
+                            )
+                            check(rowId != -1L) {
+                                "A cloud record could not be saved to local storage."
+                            }
                         }
-                        val rowId = writable.insertWithOnConflict(
-                            TABLE_DAILY_ENTRIES,
-                            null,
-                            values,
-                            SQLiteDatabase.CONFLICT_REPLACE
-                        )
-                        check(rowId != -1L) {
-                            "A cloud record could not be saved to local storage."
-                        }
+                        writable.setTransactionSuccessful()
+                    } finally {
+                        writable.endTransaction()
                     }
-                    writable.setTransactionSuccessful()
-                } finally {
-                    writable.endTransaction()
                 }
 
                 mergedEntries.size
             }
             mainHandler.post { onResult(result) }
         }
+    }
+
+    private fun <T> runOnDatabaseExecutor(block: () -> T): T {
+        val task = FutureTask<T> { block() }
+        executor.execute(task)
+        return task.get()
     }
 
     private fun readAllCloudEntries(): List<DailyTrackerCloud.CloudEntry> {
