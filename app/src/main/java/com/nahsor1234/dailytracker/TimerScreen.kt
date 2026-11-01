@@ -274,7 +274,8 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(Modifier.height(24.dp))
+            // Clears the Account + Reminders buttons pinned to the top-right corner.
+            Spacer(Modifier.height(72.dp))
             TimerModeSelector(mode) {
                 mode = it
                 finished = false
