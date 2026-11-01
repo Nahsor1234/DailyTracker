@@ -85,6 +85,9 @@ private enum class SaveState {
 internal fun DailyProgressScreen(
     repository: DailyEntryRepository,
     today: LocalDate,
+    cloud: DailyTrackerCloud,
+    cloudAccountId: String?,
+    onCloudSyncResult: (Result<Int>) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val locale = remember { Locale.getDefault() }
@@ -147,6 +150,9 @@ internal fun DailyProgressScreen(
         repository.saveEntry(updatedEntry) { result ->
             if (selectedDate == updatedEntry.date && requestRevision == saveRevision) {
                 saveState = if (result.isSuccess) SaveState.SAVED else SaveState.FAILED
+            }
+            if (result.isSuccess && cloudAccountId != null) {
+                repository.syncCloud(cloud, cloudAccountId, onCloudSyncResult)
             }
             if (result.isSuccess && YearMonth.from(updatedEntry.date) == displayedMonth) {
                 completedDates = if (updatedEntry.completed) {
