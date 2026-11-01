@@ -38,6 +38,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import java.util.Locale
 import kotlin.math.cos
+import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 
@@ -49,8 +50,13 @@ private val ParticlePalette = listOf(
     Color(0xFF91B583), Color(0xFFC2DCB3)
 )
 private data class DialParticle(
-    val x: Float, val y: Float, val bornAtMs: Long,
-    val radius: Float, val color: Color
+    val x: Float,
+    val y: Float,
+    val bornAtMs: Long,
+    val radius: Float,
+    val color: Color,
+    val drainDelayMs: Long,
+    val drainDrift: Float
 )
 
 @Composable
@@ -67,6 +73,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
     var finished by rememberSaveable { mutableStateOf(false) }
     val particles = remember { mutableStateListOf<DialParticle>() }
     var releaseParticles by remember { mutableStateOf(false) }
+    var previousCountdownMinute by rememberSaveable { mutableLongStateOf(-1L) }
 
     LaunchedEffect(watchRunning, countdownRunning) {
         while (watchRunning || countdownRunning) {
@@ -92,6 +99,17 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
     }
     val progress = if (configuredMillis > 0L)
         (1f - remaining.toFloat() / configuredMillis).coerceIn(0f, 1f) else 0f
+
+    // Release the chamber after each complete revolution of the countdown indicator.
+    LaunchedEffect(countdownRunning, remaining / 60_000L) {
+        val currentMinute = remaining / 60_000L
+        if (countdownRunning && previousCountdownMinute >= 0L &&
+            currentMinute < previousCountdownMinute
+        ) {
+            releaseParticles = true
+        }
+        previousCountdownMinute = currentMinute
+    }
 
     Surface(modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
@@ -239,9 +257,6 @@ private fun TimerModeSelector(mode: TimerMode, onModeChange: (TimerMode) -> Unit
 @Composable
 private fun CustomDurationControl(value: String, enabled: Boolean, onValueChange: (String) -> Unit) {
     val sliderValue = value.toFloatOrNull()?.coerceIn(1f, 599f) ?: 25f
-    val interaction = remember { MutableInteractionSource() }
-    val dragging by interaction.collectIsDraggedAsState()
-    val activeColor = MaterialTheme.colorScheme.primary
     Column(Modifier.fillMaxWidth()) {
         Text("Custom duration", style = MaterialTheme.typography.labelLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Medium)
@@ -298,7 +313,7 @@ private fun ParticleTimerDial(
     onReleaseFinished: () -> Unit = {}
 ) {
     val colors = MaterialTheme.colorScheme
-    var frameTimeMs by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    var animationTimeMs by rememberSaveable { mutableLongStateOf(0L) }
     var releaseStartedAt by remember { mutableLongStateOf(0L) }
 
     // A staggered close-packed layout fills the circular chamber from the bottom upward.
@@ -327,41 +342,55 @@ private fun ParticleTimerDial(
 
     LaunchedEffect(emitParticles, releaseParticles) {
         var emission = 0f
-        if (releaseParticles) releaseStartedAt = SystemClock.elapsedRealtime()
+        var previousRealtimeMs = SystemClock.elapsedRealtime()
+        if (releaseParticles) releaseStartedAt = animationTimeMs
+
         while (isActive && (emitParticles || releaseParticles)) {
-            val nowMs = SystemClock.elapsedRealtime()
-            frameTimeMs = nowMs
+            val realtimeNow = SystemClock.elapsedRealtime()
+            val frameDeltaMs = (realtimeNow - previousRealtimeMs).coerceIn(1L, 40L)
+            previousRealtimeMs = realtimeNow
+            animationTimeMs += frameDeltaMs
+            val nowMs = animationTimeMs
 
             if (emitParticles && !releaseParticles) {
-                emission += 18f / 60f
+                emission += 18f * frameDeltaMs.toFloat() / 1_000f
                 while (emission >= 1f && particles.size < particleSlots.size) {
                     val slot = particleSlots[particles.size]
-                    val jitter = Random.nextFloat() * 1.8f - 0.9f
+                    val jitterX = Random.nextFloat() * 1.8f - 0.9f
+                    val jitterY = Random.nextFloat() * 0.8f - 0.4f
+                    val heightFraction = ((228f - slot.y) / 192f).coerceIn(0f, 1f)
                     particles.add(
                         DialParticle(
-                            x = slot.x + jitter,
-                            y = slot.y,
+                            x = slot.x + jitterX,
+                            y = slot.y + jitterY,
                             bornAtMs = nowMs,
                             radius = Random.nextFloat() * 0.65f + 2.25f,
-                            color = ParticlePalette.random()
+                            color = ParticlePalette.random(),
+                            drainDelayMs = (heightFraction * 220f + Random.nextFloat() * 40f).toLong(),
+                            drainDrift = Random.nextFloat() * 12f - 6f
                         )
                     )
                     emission -= 1f
                 }
             }
 
-            if (releaseParticles && nowMs - releaseStartedAt >= 900L) {
+            if (releaseParticles && nowMs - releaseStartedAt >= 1_100L) {
                 particles.clear()
-                onReleaseFinished()
                 break
             }
+            if (releaseParticles && particles.isEmpty()) break
             delay(16L)
+        }
+
+        if (releaseParticles) {
+            particles.clear()
+            onReleaseFinished()
         }
     }
 
     Box(Modifier.size(264.dp), contentAlignment = Alignment.Center) {
         Canvas(Modifier.fillMaxSize().padding(5.dp)) {
-            val currentFrameTime = frameTimeMs
+            val currentFrameTime = animationTimeMs
             val stroke = 9.dp.toPx()
             val radius = size.minDimension / 2f - stroke / 2f
             drawCircle(colors.surfaceVariant, style = Stroke(stroke))
@@ -383,14 +412,17 @@ private fun ParticleTimerDial(
                 val age = (currentFrameTime - particle.bornAtMs).coerceAtLeast(0L)
                 val fall = (age / 520f).coerceIn(0f, 1f)
                 val easedFall = 1f - (1f - fall) * (1f - fall)
-                val drain = if (releaseParticles) {
-                    ((currentFrameTime - releaseStartedAt) / 900f).coerceIn(0f, 1f)
+                val releaseElapsed = (currentFrameTime - releaseStartedAt).coerceAtLeast(0L).toFloat()
+                val drainProgress = if (releaseParticles) {
+                    ((releaseElapsed - particle.drainDelayMs) / 800f).coerceIn(0f, 1f)
                 } else 0f
-                val x = center.x + (particle.x - 132f) / 132f * chamberRadius
+                val easedDrain = drainProgress * drainProgress
+                val baseX = center.x + (particle.x - 132f) / 132f * chamberRadius
+                val x = baseX + particle.drainDrift * easedDrain
                 val targetY = center.y + (particle.y - 132f) / 132f * chamberRadius
                 val startY = center.y - chamberRadius - 12.dp.toPx()
                 val settledY = startY + (targetY - startY) * easedFall
-                val y = settledY + drain * size.height * 1.05f
+                val y = settledY + easedDrain * size.height * 1.05f
                 val r = particle.radius / 132f * chamberRadius
                 drawCircle(particle.color, r, Offset(x, y))
                 drawCircle(
