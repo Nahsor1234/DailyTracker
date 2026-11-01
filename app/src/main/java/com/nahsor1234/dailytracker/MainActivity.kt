@@ -82,6 +82,8 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
         }
+        ReminderNotificationChannels.create(this)
+        ReminderScheduler.rescheduleAll(this)
         setContent {
             DailyTrackerTheme { DailyTrackerApp(repository, today) }
         }
