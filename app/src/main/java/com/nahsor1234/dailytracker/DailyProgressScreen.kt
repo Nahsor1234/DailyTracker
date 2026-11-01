@@ -66,7 +66,11 @@ private enum class SaveState {
 }
 
 @Composable
-internal fun DailyProgressScreen(repository: DailyEntryRepository, today: LocalDate) {
+internal fun DailyProgressScreen(
+    repository: DailyEntryRepository,
+    today: LocalDate,
+    modifier: Modifier = Modifier
+) {
     val locale = remember { Locale.getDefault() }
 
     var displayedMonth by remember { mutableStateOf(YearMonth.from(today)) }
@@ -146,7 +150,7 @@ internal fun DailyProgressScreen(repository: DailyEntryRepository, today: LocalD
     }
 
     Surface(
-        modifier = Modifier.fillMaxSize(),
+        modifier = modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
     ) {
         Column(

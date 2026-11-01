@@ -10,10 +10,15 @@ DailyTracker is a standalone Android app for recording daily progress, reviewing
 - Automatic local persistence using SQLite.
 - Past records are read-only; future records cannot be edited.
 - Calendar dates are stored as local ISO dates. A device time-zone change does not move an existing record to another date.
+- Floating pill-shaped navigation between Progress and Timer.
+- Stopwatch with start, pause, and reset controls.
+- Configurable countdown with common duration presets, pause, resume, and reset.
+- Both destinations retain their in-memory screen state while navigating between them.
+- Timer calculations use Android's monotonic elapsed-realtime clock to avoid counter drift.
 
 ## Current implementation stage
 
-This is the first complete vertical slice: Daily Progress and its local persistence. Countdown/stopwatch, reminders, authentication, and Supabase synchronization remain later stages. The UI reports that cloud synchronization is not configured; daily records do not depend on network access.
+Daily Progress and the first timer workflows are implemented. Timer completion currently has an in-app visual state only; background notifications and sound alerts are not configured. Daily records and timer state do not synchronize to Supabase. Authentication, reminders, and cloud synchronization remain later stages.
 
 ## Android configuration
 
@@ -41,7 +46,7 @@ gradle wrapper --gradle-version 8.13
 
 ## Data and security notes
 
-- Daily records are stored locally in the app's private SQLite database.
+- Daily records are stored in the app's private SQLite database.
 - The app does not yet authenticate users or synchronize records to Supabase.
 - No Supabase service-role key or privileged backend secret is embedded in the Android client.
 - Database schema changes must use versioned migrations; existing user records must not be dropped.

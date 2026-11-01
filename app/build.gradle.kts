@@ -12,8 +12,8 @@ android {
         applicationId = "com.nahsor1234.dailytracker"
         minSdk = 26
         targetSdk = 35 // Revisit against current Google Play requirements at release
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     buildTypes {
