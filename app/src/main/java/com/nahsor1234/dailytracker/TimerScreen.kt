@@ -321,7 +321,7 @@ private fun ParticleTimerDial(
     val particleSlots = remember {
         buildList {
             val center = 132f
-            val chamberRadius = 99f
+            val chamberRadius = 124f
             val spacing = 7.1f
             var row = 0
             var y = center + chamberRadius - 3f
