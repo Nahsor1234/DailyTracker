@@ -91,19 +91,19 @@ class MainActivity : ComponentActivity() {
         ReminderNotificationChannels.create(this)
         ReminderScheduler.rescheduleAll(this)
         setContent {
-            DailyTrackerTheme { DailyTrackerApp(repository, today) }
+            DailyTrackerTheme { DailyTrackerApp(repository, today, cloud) }
         }
     }
 }
 
 @Composable
-private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate) {
+private fun DailyTrackerApp(repository: DailyEntryRepository, today: LocalDate, cloud: DailyTrackerCloud) {
     var destination by rememberSaveable { mutableStateOf(TrackerDestination.PROGRESS) }
     val stateHolder = rememberSaveableStateHolder()
     val colors = MaterialTheme.colorScheme
-    var showReminders by rememberSaveable { mutableStateOf(false) }
+    var showReminders by rememberSaveable { mutableStateOf(false) }\n    var showAccount by rememberSaveable { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
-    BackHandler(enabled = showReminders) { showReminders = false }
+    BackHandler(enabled = showReminders || showAccount) {\n        if (showReminders) showReminders = false else showAccount = false\n    }
 
     // The main UI is composed once and stays composed while Reminders is open; only its zoom and
     // fade change. Swapping it out with AnimatedContent disposes the whole Progress screen
