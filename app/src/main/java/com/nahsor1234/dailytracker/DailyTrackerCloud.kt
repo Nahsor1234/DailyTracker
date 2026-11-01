@@ -1,6 +1,7 @@
 package com.nahsor1234.dailytracker
 
 import android.content.Context
+import android.net.Uri
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -25,6 +26,7 @@ internal class DailyTrackerCloud(context: Context) {
     private val apiKey = BuildConfig.SUPABASE_PUBLISHABLE_KEY
 
     data class Account(val id: String, val email: String, val verified: Boolean)
+    data class AuthCallback(val type: String, val account: Account)
 
     data class CloudEntry(
         val date: LocalDate,
@@ -57,7 +59,7 @@ internal class DailyTrackerCloud(context: Context) {
     fun signUp(email: String, password: String) {
         val response = request(
             "POST",
-            "/auth/v1/signup",
+            "/auth/v1/signup?redirect_to=" + Uri.encode(AUTH_REDIRECT_URI),
             JSONObject().put("email", email.trim()).put("password", password),
             authenticated = false
         ) as JSONObject
@@ -90,7 +92,7 @@ internal class DailyTrackerCloud(context: Context) {
     fun requestPasswordReset(email: String) {
         request(
             "POST",
-            "/auth/v1/recover",
+            "/auth/v1/recover?redirect_to=" + Uri.encode(AUTH_REDIRECT_URI),
             JSONObject().put("email", email.trim()),
             authenticated = false
         )
@@ -103,6 +105,81 @@ internal class DailyTrackerCloud(context: Context) {
             }
         }
         storage.clear()
+    }
+
+    fun acceptAuthCallback(uri: Uri): AuthCallback {
+        val parameters = mutableMapOf<String, String>()
+        listOfNotNull(uri.encodedQuery, uri.encodedFragment).forEach { encoded ->
+            encoded.split("&").forEach { part ->
+                if (part.isNotBlank()) {
+                    val separator = part.indexOf('=')
+                    val key = if (separator >= 0) part.substring(0, separator) else part
+                    val value = if (separator >= 0) part.substring(separator + 1) else ""
+                    parameters[Uri.decode(key)] = Uri.decode(value)
+                }
+            }
+        }
+
+        val callbackError = parameters["error_description"] ?: parameters["error"]
+        require(callbackError.isNullOrBlank()) { callbackError ?: "Authentication callback failed." }
+        val accessToken = requireNotNull(parameters["access_token"]) {
+            "The authentication link did not include an access token."
+        }
+        val refreshToken = requireNotNull(parameters["refresh_token"]) {
+            "The authentication link did not include a refresh token."
+        }
+        val type = parameters["type"].orEmpty()
+        require(type == "signup" || type == "recovery" || type == "email_change") {
+            "Unsupported authentication link type."
+        }
+
+        val jwtPayload = accessToken.split('.').getOrNull(1)
+            ?: error("The authentication token is invalid.")
+        val claims = JSONObject(
+            String(
+                Base64.decode(
+                    jwtPayload,
+                    Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
+                ),
+                Charsets.UTF_8
+            )
+        )
+        val expiry = parameters["expires_at"]?.toLongOrNull()
+            ?: (Instant.now().epochSecond + (parameters["expires_in"]?.toLongOrNull() ?: 3600L))
+        storage.write(
+            Session(
+                accessToken = accessToken,
+                refreshToken = refreshToken,
+                expiresAt = expiry,
+                userId = claims.getString("sub"),
+                email = claims.optString("email"),
+                verified = false
+            )
+        )
+
+        val user = request("GET", "/auth/v1/user", null, authenticated = true) as JSONObject
+        val verifiedAt = user.optString("email_confirmed_at")
+        val session = Session(
+            accessToken = accessToken,
+            refreshToken = refreshToken,
+            expiresAt = expiry,
+            userId = user.getString("id"),
+            email = user.optString("email"),
+            verified = verifiedAt.isNotBlank() && verifiedAt != "null"
+        )
+        storage.write(session)
+        return AuthCallback(type, Account(session.userId, session.email, session.verified))
+    }
+
+    fun updatePassword(newPassword: String): Account {
+        require(newPassword.length >= 6) { "Password must contain at least 6 characters." }
+        request(
+            "PUT",
+            "/auth/v1/user",
+            JSONObject().put("password", newPassword),
+            authenticated = true
+        )
+        return requireNotNull(currentAccount()) { "Password updated, but the session could not be restored." }
     }
 
     /**
@@ -341,5 +418,6 @@ private class EncryptedSessionStore(context: Context) {
 
     private companion object {
         const val KEY_ALIAS = "dailytracker_supabase_session"
+        const val AUTH_REDIRECT_URI = "com.nahsor1234.dailytracker://auth/callback"
     }
 }
