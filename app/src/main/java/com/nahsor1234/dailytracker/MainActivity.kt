@@ -160,7 +160,10 @@ private fun DailyTrackerApp(
             syncInProgress = false
             cloudSyncStatus = result.fold(
                 { "Synced " + it + " daily records." },
-                { "Sync failed: " + (it.message ?: "Unknown error.") }
+                {
+                    cloudAccountId = null
+                    "Sync failed: " + (it.message ?: "Unknown error.")
+                }
             )
         }
     }
