@@ -214,10 +214,24 @@ internal object ReminderNotificationChannels {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val channel = if (reminder.kind == ReminderKind.ALARM) alarmChannelId(reminder.ringtoneUri) else NOTIFICATIONS
+        val dismiss = PendingIntent.getBroadcast(
+            context,
+            reminder.id.hashCode(),
+            Intent(context, ReminderDismissReceiver::class.java)
+                .setAction(ReminderDismissReceiver.ACTION_DISMISS)
+                .putExtra(ReminderDismissReceiver.EXTRA_NOTIFICATION_ID, reminder.id.hashCode()),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val notification = Notification.Builder(context, channel)
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
             .setContentTitle(reminder.title)
-            .setContentText(if (reminder.kind == ReminderKind.ALARM) "Your scheduled alarm" else "Your scheduled reminder")
+            .setContentText(if (reminder.kind == ReminderKind.ALARM) "Scheduled alarm" else "Scheduled reminder")
+            .setStyle(Notification.BigTextStyle().bigText(
+                if (reminder.kind == ReminderKind.ALARM) "Your scheduled alarm is due." else "Your scheduled reminder is due."
+            ))
+            .setWhen(System.currentTimeMillis())
+            .setShowWhen(true)
+            .addAction(Notification.Action.Builder(null, "Dismiss", dismiss).build())
             .setCategory(if (reminder.kind == ReminderKind.ALARM) Notification.CATEGORY_ALARM else Notification.CATEGORY_REMINDER)
             .setPriority(if (reminder.kind == ReminderKind.ALARM) Notification.PRIORITY_HIGH else Notification.PRIORITY_DEFAULT)
             .setAutoCancel(true)
@@ -253,5 +267,19 @@ internal class ReminderRescheduleReceiver : BroadcastReceiver() {
             Intent.ACTION_TIMEZONE_CHANGED,
             Intent.ACTION_MY_PACKAGE_REPLACED -> ReminderScheduler.rescheduleAll(context)
         }
+    }
+}
+
+
+internal class ReminderDismissReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != ACTION_DISMISS) return
+        val id = intent.getIntExtra(EXTRA_NOTIFICATION_ID, -1)
+        if (id != -1) context.getSystemService(NotificationManager::class.java).cancel(id)
+    }
+
+    companion object {
+        const val ACTION_DISMISS = "com.nahsor1234.dailytracker.action.DISMISS_REMINDER"
+        const val EXTRA_NOTIFICATION_ID = "notification_id"
     }
 }
