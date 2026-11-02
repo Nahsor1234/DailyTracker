@@ -111,6 +111,7 @@ internal object ReminderScheduler {
             pendingIntent(context, reminder.id),
             asAlarmClock = reminder.kind == ReminderKind.ALARM
         )
+        AlarmLog.scheduled(context, RingRequest.SOURCE_REMINDER, reminder.id, triggerAt)
     }
 
     /** Removes the reminder's alarm and any snooze it has pending. */
@@ -118,10 +119,42 @@ internal object ReminderScheduler {
         val manager = context.getSystemService(AlarmManager::class.java)
         manager.cancel(pendingIntent(context, id))
         AlarmRinging.cancelSnooze(context, RingRequest.SOURCE_REMINDER, id)
+        AlarmLog.clear(context, RingRequest.SOURCE_REMINDER, id)
     }
 
+    /** An alarm up to this late is still rung (late) when the app finds it was never delivered. */
+    private const val LATE_RING_WINDOW_MS = 10 * 60_000L
+    private const val MISSED_GRACE_MS = 30_000L
+
     fun rescheduleAll(context: Context) {
-        ReminderStore(context).all().filter { it.enabled }.forEach { schedule(context, it) }
+        val store = ReminderStore(context)
+        store.all().filter { it.enabled }.forEach { reminder ->
+            val handled = recoverIfMissed(context, store, reminder)
+            // A one-time reminder that was just handled is finished; everything else is re-armed.
+            if (!(handled && !reminder.daily)) schedule(context, reminder)
+        }
+    }
+
+    /**
+     * If this reminder was due before now but never fired (the phone held the alarm back, or
+     * force-stopped the app), say so instead of silently moving on. Recent ones still ring, older
+     * ones leave a "Missed" note. Returns true if it was missed.
+     */
+    private fun recoverIfMissed(context: Context, store: ReminderStore, reminder: TrackerReminder): Boolean {
+        val expected = AlarmLog.expected(context, RingRequest.SOURCE_REMINDER, reminder.id)
+        val now = System.currentTimeMillis()
+        if (expected <= 0L || expected > now - MISSED_GRACE_MS) return false
+
+        AlarmLog.clear(context, RingRequest.SOURCE_REMINDER, reminder.id)
+        if (!reminder.daily) store.upsert(reminder.copy(enabled = false))
+        val ring = RingRequest.forReminder(reminder)
+        if (now - expected <= LATE_RING_WINDOW_MS) {
+            AlarmLog.fired(context, expected)
+            AlarmRinging.deliver(context, ring)
+        } else {
+            AlarmNotifications.postMissed(context, ring)
+        }
+        return true
     }
 
     private fun pendingIntent(context: Context, id: Long): PendingIntent {
@@ -164,6 +197,12 @@ internal class ReminderAlarmReceiver : BroadcastReceiver() {
         val reminder = store.find(id) ?: return
         if (!reminder.enabled) return
 
+        // A delivery that arrives long before the next due time is a leftover of something already
+        // handled (e.g. after the app caught up on a missed alarm): ignore it rather than ring twice.
+        val expected = AlarmLog.expected(context, RingRequest.SOURCE_REMINDER, id)
+        if (expected > 0L && expected - System.currentTimeMillis() > 60_000L) return
+        AlarmLog.fired(context, expected)
+
         // Arm the next occurrence before showing anything, so a daily reminder keeps coming even
         // if showing this one fails.
         runCatching {
@@ -171,6 +210,7 @@ internal class ReminderAlarmReceiver : BroadcastReceiver() {
                 ReminderScheduler.schedule(context, reminder)
             } else {
                 store.upsert(reminder.copy(enabled = false))
+                AlarmLog.clear(context, RingRequest.SOURCE_REMINDER, id)
             }
         }
         AlarmRinging.deliver(context, RingRequest.forReminder(reminder))
