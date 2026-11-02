@@ -998,3 +998,31 @@ private fun CheckBadge(completed: Boolean) {
 
 @Composable
 private fun InfoPanel(title: String, description: String) {
+    Column(
+        Modifier.glassCard().padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text(
+            text = title,
+            color = MaterialTheme.colorScheme.onSurface,
+            style = TextStyle(fontSize = 16.sp, fontWeight = FontWeight.Medium)
+        )
+        Text(
+            text = description,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+private fun buildCalendarDays(
+    month: YearMonth,
+    firstDayOfWeek: DayOfWeek
+): List<LocalDate?> {
+    val offset = (month.atDay(1).dayOfWeek.value - firstDayOfWeek.value + 7) % 7
+    val days = buildList<LocalDate?> {
+        repeat(offset) { add(null) }
+        for (day in 1..month.lengthOfMonth()) add(month.atDay(day))
+    }
+    return days + List((7 - days.size % 7) % 7) { null }
+}
