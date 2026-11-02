@@ -22,7 +22,10 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.ui.draw.drawWithContent
@@ -31,8 +34,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import kotlin.math.PI
 import kotlin.math.sin
@@ -79,6 +83,18 @@ class MainActivity : ComponentActivity() {
     }
     private val cloud by lazy(LazyThreadSafetyMode.NONE) {
         DailyTrackerCloud(applicationContext)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        TimerAlertState.appInForeground = true
+        TimerAlerts.dismissNotification(this)
+    }
+
+    override fun onStop() {
+        TimerAlertState.appInForeground = false
+        TimerAlarmPlayer.stop(this)
+        super.onStop()
     }
 
     override fun onResume() {
@@ -133,6 +149,9 @@ private fun DailyTrackerApp(
     val stateHolder = rememberSaveableStateHolder()
     val colors = MaterialTheme.colorScheme
     var showReminders by rememberSaveable { mutableStateOf(false) }
+    // Once the Timer has been opened it stays composed (like Progress), so switching screens only
+    // moves two already-built layers instead of building/destroying a screen mid-animation.
+    var timerVisited by rememberSaveable { mutableStateOf(false) }
     var showAccount by rememberSaveable { mutableStateOf(false) }
     var cloudAccountId by remember { mutableStateOf<String?>(null) }
     var cloudSyncStatus by rememberSaveable { mutableStateOf("") }
@@ -234,6 +253,14 @@ private fun DailyTrackerApp(
         label = "main-fade"
     )
 
+    // 0f = Progress fully shown, 1f = Timer fully shown. Only read inside graphicsLayer blocks,
+    // so the slide runs without recomposing either screen.
+    val timerFraction by animateFloatAsState(
+        targetValue = if (destination == TrackerDestination.TIMER) 1f else 0f,
+        animationSpec = tween(300, easing = FastOutSlowInEasing),
+        label = "screen-slide"
+    )
+
     Box(Modifier.fillMaxSize().background(colors.background)) {
         Box(
             Modifier.fillMaxSize()
@@ -245,28 +272,30 @@ private fun DailyTrackerApp(
                 // While Reminders covers it, keep the hidden UI out of accessibility.
                 .then(if (showReminders) Modifier.clearAndSetSemantics { } else Modifier)
         ) {
-            // Pre-composes the Timer screen off-screen so the first Progress -> Timer slide is smooth.
+            // Pre-composes the Timer screen off-screen so the very first Progress -> Timer slide is
+            // smooth. After the Timer has been opened once this is no longer needed.
             TimerScreenWarmUp(
-                enabled = destination == TrackerDestination.PROGRESS,
+                enabled = destination == TrackerDestination.PROGRESS && !timerVisited,
                 modifier = Modifier.fillMaxSize().statusBarsPadding()
             )
-            AnimatedContent(
-                targetState = destination,
-                modifier = Modifier.fillMaxSize().statusBarsPadding(),
-                transitionSpec = {
-                    if (targetState == TrackerDestination.TIMER) {
-                        (slideInHorizontally(tween(300)) { it } + fadeIn(tween(180))) togetherWith
-                            (slideOutHorizontally(tween(300)) { -it / 3 } + fadeOut(tween(180)))
-                    } else {
-                        (slideInHorizontally(tween(300)) { -it } + fadeIn(tween(180))) togetherWith
-                            (slideOutHorizontally(tween(300)) { it / 3 } + fadeOut(tween(180)))
-                    }
-                },
-                label = "screen-slide"
-            ) { target ->
-                stateHolder.SaveableStateProvider(target) {
-                    when (target) {
-                        TrackerDestination.PROGRESS -> DailyProgressScreen(
+            // Both screens stay composed. Previously AnimatedContent destroyed Progress when
+            // leaving it and rebuilt it (calendar, 30-capsule strip, DB loads, entrance animations)
+            // inside the Timer -> Progress slide, which caused the stutter.
+            Box(Modifier.fillMaxSize().statusBarsPadding()) {
+                Box(
+                    Modifier.fillMaxSize()
+                        .graphicsLayer {
+                            val f = timerFraction
+                            translationX = if (f >= 1f) -size.width else -size.width / 3f * f
+                            alpha = (1f - f / 0.6f).coerceIn(0f, 1f)
+                        }
+                        .then(
+                            if (destination != TrackerDestination.PROGRESS) Modifier.clearAndSetSemantics { }
+                            else Modifier
+                        )
+                ) {
+                    stateHolder.SaveableStateProvider(TrackerDestination.PROGRESS) {
+                        DailyProgressScreen(
                             repository = repository,
                             today = today,
                             cloud = cloud,
@@ -274,7 +303,24 @@ private fun DailyTrackerApp(
                             cloudDataRevision = cloudDataRevision,
                             onCloudSyncResult = ::handleCloudSyncResult
                         )
-                        TrackerDestination.TIMER -> TimerScreen()
+                    }
+                }
+                if (timerVisited) {
+                    Box(
+                        Modifier.fillMaxSize()
+                            .graphicsLayer {
+                                val f = timerFraction
+                                translationX = if (f <= 0f) size.width else size.width * (1f - f)
+                                alpha = (f / 0.6f).coerceIn(0f, 1f)
+                            }
+                            .then(
+                                if (destination != TrackerDestination.TIMER) Modifier.clearAndSetSemantics { }
+                                else Modifier
+                            )
+                    ) {
+                        stateHolder.SaveableStateProvider(TrackerDestination.TIMER) {
+                            TimerScreen()
+                        }
                     }
                 }
             }
@@ -289,23 +335,36 @@ private fun DailyTrackerApp(
             )
             FloatingNavigationBar(
                 selected = destination,
-                onSelect = { destination = it },
+                onSelect = {
+                    // Both screens stay composed, so drop focus (and the keyboard) explicitly.
+                    focusManager.clearFocus()
+                    if (it == TrackerDestination.TIMER) timerVisited = true
+                    destination = it
+                },
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .navigationBarsPadding().padding(bottom = 10.dp)
             )
-            androidx.compose.material3.TextButton(
-                onClick = { showAccount = true },
-                modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(top = 8.dp, start = 12.dp)
-            ) { Text("Account") }
-            ReminderEntryButton(
-                onClick = {
-                    // The UI underneath stays composed, so drop focus (and the keyboard) explicitly.
-                    focusManager.clearFocus()
-                    showReminders = true
-                },
-                modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding()
-                    .padding(top = 12.dp, end = 16.dp)
-            )
+            Row(
+                Modifier.align(Alignment.TopEnd).statusBarsPadding()
+                    .padding(top = 12.dp, end = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AccountEntryButton(
+                    onClick = {
+                        focusManager.clearFocus()
+                        showAccount = true
+                    },
+                    signedIn = cloudAccountId != null
+                )
+                ReminderEntryButton(
+                    onClick = {
+                        // The UI underneath stays composed, so drop focus (and the keyboard) explicitly.
+                        focusManager.clearFocus()
+                        showReminders = true
+                    }
+                )
+            }
         }
 
         if (showAccount) {
@@ -339,17 +398,102 @@ private fun DailyTrackerApp(
         ) {
             ReminderScreen(onBack = { showReminders = false })
         }
+
+        // Shown while the countdown alert is ringing, whichever screen is open.
+        AnimatedVisibility(
+            visible = TimerAlarmPlayer.ringing,
+            modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 68.dp),
+            enter = slideInVertically(tween(320, easing = FastOutSlowInEasing)) { -it } + fadeIn(tween(200)),
+            exit = slideOutVertically(tween(240, easing = FastOutSlowInEasing)) { -it } + fadeOut(tween(160))
+        ) {
+            TimerRingingBanner()
+        }
+    }
+}
+
+@Composable
+private fun TimerRingingBanner() {
+    val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val source = rememberPressSource()
+    val pulse by rememberInfiniteTransition(label = "ring-pulse").animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse),
+        label = "ring-pulse-value"
+    )
+    Row(
+        Modifier.pressScale(source, 0.96f)
+            .clip(CircleShape)
+            .background(Brush.horizontalGradient(listOf(Color(0xFF222E25), Color(0xFF161E18))))
+            .border(1.dp, scheme.primary.copy(alpha = 0.55f), CircleShape)
+            .hapticClickable(source, haptic = { heavy() }) {
+                TimerAlarmPlayer.stop(context)
+                TimerAlerts.dismissNotification(context)
+            }
+            .padding(start = 18.dp, end = 8.dp, top = 8.dp, bottom = 8.dp)
+            .semantics { contentDescription = "Time is up. Tap to stop the alert."; role = Role.Button },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier.size(9.dp).graphicsLayer { alpha = pulse }
+                .clip(CircleShape).background(scheme.primary)
+        )
+        Spacer(Modifier.width(10.dp))
+        Text("Time is up", color = scheme.onBackground, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.width(14.dp))
+        Box(
+            Modifier.clip(CircleShape).background(scheme.primary)
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            Text("Stop", color = scheme.onPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun AccountEntryButton(onClick: () -> Unit, signedIn: Boolean, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    val tint = if (signedIn) scheme.primary else scheme.onSurface
+    val source = rememberPressSource()
+    Box(
+        modifier.pressScale(source).size(44.dp).clip(CircleShape)
+            .background(Color.White.copy(alpha = 0.045f))
+            .border(1.dp, if (signedIn) scheme.primary.copy(alpha = 0.45f) else Color.White.copy(alpha = 0.09f), CircleShape)
+            .hapticClickable(source, onClick = onClick)
+            .semantics {
+                contentDescription = if (signedIn) "Account, signed in" else "Account, sign in"
+                role = Role.Button
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(Modifier.size(21.dp)) {
+            val stroke = Stroke(width = 1.7.dp.toPx(), cap = StrokeCap.Round)
+            // Head
+            drawCircle(tint, size.width * 0.20f, Offset(size.width / 2f, size.height * 0.32f), style = stroke)
+            // Shoulders
+            drawArc(
+                color = tint,
+                startAngle = 180f,
+                sweepAngle = 180f,
+                useCenter = false,
+                topLeft = Offset(size.width * 0.14f, size.height * 0.60f),
+                size = Size(size.width * 0.72f, size.height * 0.60f),
+                style = stroke
+            )
+        }
     }
 }
 
 @Composable
 private fun ReminderEntryButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
     val tint = MaterialTheme.colorScheme.onSurface
+    val source = rememberPressSource()
     Box(
-        modifier.size(44.dp).clip(CircleShape)
+        modifier.pressScale(source).size(44.dp).clip(CircleShape)
             .background(Color.White.copy(alpha = 0.045f))
             .border(1.dp, Color.White.copy(alpha = 0.09f), CircleShape)
-            .clickable(onClick = onClick),
+            .hapticClickable(source, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Canvas(Modifier.size(21.dp)) {
@@ -379,7 +523,7 @@ private fun FloatingNavigationBar(
     modifier: Modifier = Modifier
 ) {
     val scheme = MaterialTheme.colorScheme
-    val haptics = LocalHapticFeedback.current
+    val haptics = rememberHaptics()
     val selectedIndex = if (selected == TrackerDestination.PROGRESS) 0 else 1
     val itemWidth = 125.dp // (260dp bar - 2 * 5dp padding) / 2 items
 
@@ -438,7 +582,7 @@ private fun FloatingNavigationBar(
                     selected == TrackerDestination.PROGRESS,
                     {
                         if (selected != TrackerDestination.PROGRESS) {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            haptics.select()
                         }
                         onSelect(TrackerDestination.PROGRESS)
                     }, Modifier.weight(1f))
@@ -446,7 +590,7 @@ private fun FloatingNavigationBar(
                     selected == TrackerDestination.TIMER,
                     {
                         if (selected != TrackerDestination.TIMER) {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            haptics.select()
                         }
                         onSelect(TrackerDestination.TIMER)
                     }, Modifier.weight(1f))

@@ -3,7 +3,9 @@ package com.nahsor1234.dailytracker
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
@@ -54,6 +56,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -97,8 +100,15 @@ internal fun DailyProgressScreen(
     var displayedMonth by remember { mutableStateOf(YearMonth.from(today)) }
     var selectedDate by remember { mutableStateOf(today) }
     var selectedEntry by remember { mutableStateOf<DailyEntry?>(null) }
-    var completedDates by remember { mutableStateOf<Set<LocalDate>>(emptySet()) }
-    var isLoading by remember { mutableStateOf(true) }
+    // Completed days per month. The neighbouring months are kept cached, so changing month never
+    // shows an empty calendar or month strip while the database answers.
+    val completedByMonth = remember { mutableStateMapOf<YearMonth, Set<LocalDate>>() }
+    val completedDates = completedByMonth[displayedMonth] ?: emptySet()
+    // The date whose record is held in selectedEntry. The panel under the calendar is drawn for
+    // this date, so changing the selection never flashes a "Loading" panel, and a record can never
+    // be edited under the wrong date while the next one is still being read.
+    var loadedDate by remember { mutableStateOf<LocalDate?>(null) }
+    var isLoading by remember { mutableStateOf(true) } // only true until the first record arrives
     var loadFailed by remember { mutableStateOf(false) }
     var saveState by remember { mutableStateOf(SaveState.IDLE) }
     var saveRevision by remember { mutableIntStateOf(0) }
@@ -115,13 +125,14 @@ internal fun DailyProgressScreen(
 
     DisposableEffect(selectedDate) {
         var active = true
-        isLoading = true
+        val requested = selectedDate
         loadFailed = false
-        repository.loadEntry(selectedDate) { result ->
+        repository.loadEntry(requested) { result ->
             if (active) {
                 result.fold(
                     onSuccess = { entry ->
                         selectedEntry = entry
+                        loadedDate = requested
                         isLoading = false
                         loadFailed = false
                         saveState = if (entry == null) SaveState.IDLE else SaveState.SAVED
@@ -137,15 +148,20 @@ internal fun DailyProgressScreen(
         onDispose { active = false }
     }
 
-    DisposableEffect(displayedMonth) {
-        var active = true
-        completedDates = emptySet()
-        repository.loadCompletedDates(displayedMonth) { result ->
-            if (active) {
-                result.onSuccess { completedDates = it }
+    LaunchedEffect(displayedMonth) {
+        fun load(month: YearMonth) {
+            repository.loadCompletedDates(month) { result ->
+                if (screenActive.get()) result.onSuccess { completedByMonth[month] = it }
             }
         }
-        onDispose { active = false }
+        load(displayedMonth)
+        listOf(displayedMonth.minusMonths(1), displayedMonth.plusMonths(1)).forEach { neighbour ->
+            if (!completedByMonth.containsKey(neighbour)) load(neighbour)
+        }
+        // Keep the cache small.
+        completedByMonth.keys.removeAll {
+            kotlin.math.abs(java.time.temporal.ChronoUnit.MONTHS.between(it, displayedMonth)) > 3
+        }
     }
 
     LaunchedEffect(cloudDataRevision) {
@@ -153,8 +169,10 @@ internal fun DailyProgressScreen(
             repository.loadEntry(selectedDate) { result ->
                 if (screenActive.get()) result.onSuccess { selectedEntry = it }
             }
-            repository.loadCompletedDates(displayedMonth) { result ->
-                if (screenActive.get()) result.onSuccess { completedDates = it }
+            listOf(displayedMonth, displayedMonth.minusMonths(1), displayedMonth.plusMonths(1)).forEach { month ->
+                repository.loadCompletedDates(month) { result ->
+                    if (screenActive.get()) result.onSuccess { completedByMonth[month] = it }
+                }
             }
         }
     }
@@ -172,11 +190,14 @@ internal fun DailyProgressScreen(
             if (result.isSuccess && cloudAccountId != null) {
                 repository.syncCloud(cloud, cloudAccountId, onCloudSyncResult)
             }
-            if (result.isSuccess && YearMonth.from(updatedEntry.date) == displayedMonth) {
-                completedDates = if (updatedEntry.completed) {
-                    completedDates + updatedEntry.date
-                } else {
-                    completedDates - updatedEntry.date
+            if (result.isSuccess) {
+                val month = YearMonth.from(updatedEntry.date)
+                completedByMonth[month]?.let { current ->
+                    completedByMonth[month] = if (updatedEntry.completed) {
+                        current + updatedEntry.date
+                    } else {
+                        current - updatedEntry.date
+                    }
                 }
             }
         }
@@ -194,6 +215,7 @@ internal fun DailyProgressScreen(
     val todayFormatter = remember(locale) { DateTimeFormatter.ofPattern("EEE, d MMM", locale) }
     val monthNameFormatter = remember(locale) { DateTimeFormatter.ofPattern("MMMM", locale) }
     val primary = MaterialTheme.colorScheme.primary
+    val haptics = rememberHaptics()
 
     Surface(
         modifier = modifier.fillMaxSize(),
@@ -234,9 +256,10 @@ internal fun DailyProgressScreen(
                     month = displayedMonth,
                     selectedDate = selectedDate,
                     today = today,
-                    completedDates = completedDates,
+                    completedFor = { completedByMonth[it] ?: emptySet() },
                     locale = locale,
                     onPreviousMonth = {
+                        haptics.select()
                         val target = displayedMonth.minusMonths(1)
                         displayedMonth = target
                         selectedDate = target.atDay(
@@ -244,13 +267,17 @@ internal fun DailyProgressScreen(
                         )
                     },
                     onNextMonth = {
+                        haptics.select()
                         val target = displayedMonth.plusMonths(1)
                         displayedMonth = target
                         selectedDate = target.atDay(
                             selectedDate.dayOfMonth.coerceAtMost(target.lengthOfMonth())
                         )
                     },
-                    onSelectDate = { selectedDate = it }
+                    onSelectDate = {
+                        if (it != selectedDate) haptics.select()
+                        selectedDate = it
+                    }
                 )
 
                 Spacer(Modifier.height(28.dp))
@@ -294,7 +321,9 @@ internal fun DailyProgressScreen(
 
                 Spacer(Modifier.height(16.dp))
 
-                Reveal(key = selectedDate to isLoading) {
+                val panelDate = loadedDate ?: selectedDate
+                Box(Modifier.animateContentSize(tween(260, easing = FastOutSlowInEasing))) {
+                Reveal(key = panelDate) {
                     when {
                         isLoading -> InfoPanel(
                             title = "Loading day…",
@@ -304,14 +333,14 @@ internal fun DailyProgressScreen(
                             title = "Couldn't load this day",
                             description = "Your existing records have not been changed. Select the day again to retry."
                         )
-                        selectedDate.isAfter(today) -> InfoPanel(
+                        panelDate.isAfter(today) -> InfoPanel(
                             title = "Not available yet",
                             description = "Daily records can only be created or edited on the current local calendar date."
                         )
-                        selectedDate.isBefore(today) -> PastDayPanel(entry = selectedEntry)
+                        panelDate.isBefore(today) -> PastDayPanel(entry = selectedEntry)
                         else -> TodayEditor(
                             entry = selectedEntry ?: DailyEntry(
-                                date = selectedDate,
+                                date = panelDate,
                                 completed = false,
                                 description = ""
                             ),
@@ -319,6 +348,7 @@ internal fun DailyProgressScreen(
                             onEntryChange = ::save
                         )
                     }
+                }
                 }
 
                 Spacer(Modifier.navigationBarsPadding().height(120.dp))
@@ -422,7 +452,7 @@ private fun MonthStrip(month: YearMonth, completedDates: Set<LocalDate>, today: 
                     label = "strip-height"
                 )
                 Box(
-                    Modifier.weight(1f).height(height).clip(CircleShape).background(color)
+                    Modifier.weight(1f).height(height).clip(CircleShape).drawBehind { drawRect(color) }
                 )
             }
         }
@@ -434,7 +464,7 @@ private fun MonthCalendar(
     month: YearMonth,
     selectedDate: LocalDate,
     today: LocalDate,
-    completedDates: Set<LocalDate>,
+    completedFor: (YearMonth) -> Set<LocalDate>,
     locale: Locale,
     onPreviousMonth: () -> Unit,
     onNextMonth: () -> Unit,
@@ -492,12 +522,20 @@ private fun MonthCalendar(
             targetState = month,
             transitionSpec = {
                 val direction = if (targetState > initialState) 1 else -1
-                (slideInHorizontally(tween(340)) { it * direction / 4 } + fadeIn(tween(240))) togetherWith
-                    (slideOutHorizontally(tween(340)) { -it * direction / 4 } + fadeOut(tween(160)))
+                ((slideInHorizontally(tween(340)) { it * direction / 4 } + fadeIn(tween(240))) togetherWith
+                    (slideOutHorizontally(tween(340)) { -it * direction / 4 } + fadeOut(tween(160))))
+                    // The grid always has six rows, so its size never changes between months.
+                    .using(SizeTransform(clip = false) { _, _ -> snap() })
             },
             label = "calendar-grid"
         ) { shownMonth ->
-            val days = remember(shownMonth, locale) { buildCalendarDays(shownMonth, firstDayOfWeek) }
+            // Each grid uses its own month's data, so the outgoing grid keeps its markers while it
+            // slides away instead of switching to the new month's data mid-animation.
+            val completed = completedFor(shownMonth)
+            val days = remember(shownMonth, locale) {
+                val built = buildCalendarDays(shownMonth, firstDayOfWeek)
+                built + List((42 - built.size).coerceAtLeast(0)) { null }
+            }
             Column(Modifier.fillMaxWidth()) {
                 days.chunked(7).forEach { week ->
                     Row(Modifier.fillMaxWidth()) {
@@ -509,7 +547,7 @@ private fun MonthCalendar(
                                     date = date,
                                     isToday = date == today,
                                     isSelected = date == selectedDate,
-                                    isCompleted = date in completedDates,
+                                    isCompleted = date in completed,
                                     isFuture = date.isAfter(today),
                                     onClick = { onSelectDate(date) },
                                     modifier = Modifier.weight(1f).aspectRatio(1f).padding(2.dp)
@@ -537,10 +575,11 @@ private fun MonthCalendar(
 @Composable
 private fun NavChevron(forward: Boolean, description: String, onClick: () -> Unit) {
     val tint = MaterialTheme.colorScheme.onSurfaceVariant
+    val source = rememberPressSource()
     Box(
-        Modifier.size(40.dp).clip(CircleShape)
+        Modifier.pressScale(source).size(40.dp).clip(CircleShape)
             .border(1.dp, Color.White.copy(alpha = 0.12f), CircleShape)
-            .clickable(onClick = onClick)
+            .hapticClickable(source, haptic = {}, onClick = onClick)
             .semantics {
                 contentDescription = description
                 role = Role.Button
@@ -580,53 +619,42 @@ private fun CalendarDayCell(
     modifier: Modifier = Modifier
 ) {
     val scheme = MaterialTheme.colorScheme
-    val scale by animateFloatAsState(
-        targetValue = if (isSelected) 1f else 0.9f,
+    // One animated value per cell (was five). Colours, scale, ring and glow are all derived from
+    // it while drawing, so a selection change does not recompose the 42 cells of the grid.
+    val selection by animateFloatAsState(
+        targetValue = if (isSelected) 1f else 0f,
         animationSpec = spring(Spring.DampingRatioMediumBouncy, Spring.StiffnessMedium),
-        label = "day-scale"
+        label = "day-selection"
     )
-    val fill by animateColorAsState(
-        targetValue = when {
-            isSelected -> scheme.primary
-            isCompleted -> scheme.primary.copy(alpha = 0.16f)
-            else -> Color.Transparent
-        },
-        animationSpec = tween(220),
-        label = "day-fill"
-    )
-    val textColor by animateColorAsState(
-        targetValue = when {
-            isSelected -> scheme.onPrimary
-            isFuture -> scheme.onSurfaceVariant.copy(alpha = 0.4f)
-            else -> scheme.onSurface
-        },
-        animationSpec = tween(200),
-        label = "day-text"
-    )
-    val markerColor by animateColorAsState(
-        targetValue = when {
-            isSelected && isCompleted -> scheme.onPrimary
-            isCompleted -> scheme.primary
-            else -> Color.Transparent
-        },
-        animationSpec = tween(250),
-        label = "day-marker"
-    )
-    val ringAlpha by animateFloatAsState(
-        targetValue = if (isToday && !isSelected) 1f else 0f,
-        animationSpec = tween(200),
-        label = "day-ring"
-    )
+    val primary = scheme.primary
+    val restingFill = primary.copy(alpha = if (isCompleted) 0.16f else 0f)
+    val restingText = if (isFuture) scheme.onSurfaceVariant.copy(alpha = 0.4f) else scheme.onSurface
+    val textColor = lerp(restingText, scheme.onPrimary, selection.coerceIn(0f, 1f))
+    val markerColor = if (isCompleted) lerp(primary, scheme.onPrimary, selection.coerceIn(0f, 1f)) else Color.Transparent
 
     Box(modifier, contentAlignment = Alignment.Center) {
         Box(
             Modifier.fillMaxSize()
                 .graphicsLayer {
+                    val scale = 0.9f + 0.1f * selection
                     scaleX = scale
                     scaleY = scale
                 }
-                .background(fill, CircleShape)
-                .border(1.dp, scheme.primary.copy(alpha = ringAlpha), CircleShape)
+                .drawBehind {
+                    val t = selection.coerceIn(0f, 1f)
+                    // Soft glow that blooms around the selected day.
+                    if (t > 0.01f) {
+                        drawCircle(primary.copy(alpha = 0.22f * t), radius = size.minDimension / 2f * (1f + 0.22f * t))
+                    }
+                    drawCircle(lerp(restingFill, primary, t))
+                    if (isToday) {
+                        drawCircle(
+                            primary.copy(alpha = 1f - t),
+                            radius = size.minDimension / 2f - 0.5.dp.toPx(),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(1.dp.toPx())
+                        )
+                    }
+                }
         )
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -715,6 +743,7 @@ private fun TodayEditor(
 @Composable
 private fun CompletionToggle(completed: Boolean, onChange: (Boolean) -> Unit) {
     val scheme = MaterialTheme.colorScheme
+    val haptics = rememberHaptics()
     val check = remember { Animatable(if (completed) 1f else 0f) }
     val burst = remember { Animatable(1f) } // 1f = finished, nothing visible
     var previous by remember { mutableStateOf(completed) }
@@ -732,7 +761,14 @@ private fun CompletionToggle(completed: Boolean, onChange: (Boolean) -> Unit) {
 
     Row(
         Modifier.fillMaxWidth()
-            .toggleable(value = completed, role = Role.Checkbox, onValueChange = onChange),
+            .toggleable(
+                value = completed,
+                role = Role.Checkbox,
+                onValueChange = {
+                    if (it) haptics.confirm() else haptics.toggle(false)
+                    onChange(it)
+                }
+            ),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(Modifier.size(64.dp)) {
@@ -820,7 +856,7 @@ private fun DescriptionField(value: String, onValueChange: (String) -> Unit) {
 
     Column {
         Box(
-            Modifier.fillMaxWidth().heightIn(min = 128.dp)
+            Modifier.fillMaxWidth().heightIn(min = 168.dp)
                 .clip(shape)
                 .background(Color.Black.copy(alpha = 0.18f))
                 .border(1.dp, borderColor, shape)
