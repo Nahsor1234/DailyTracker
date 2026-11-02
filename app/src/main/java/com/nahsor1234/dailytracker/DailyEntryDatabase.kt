@@ -90,7 +90,37 @@ internal class DailyEntryRepository(context: Context) {
         }
     }
 
+    private var pendingEntry: DailyEntry? = null
+    private var pendingCallback: ((Result<Unit>) -> Unit)? = null
+    private val flushPendingRunnable = Runnable { flushPendingSave() }
+
+    /**
+     * For text typing: remembers the latest edit and writes it once the user pauses, instead of
+     * writing (and, when signed in, syncing to the cloud) on every keystroke. Must be called on
+     * the main thread. [flushPendingSave] writes it immediately when the app goes to the background.
+     */
+    fun saveEntryDebounced(entry: DailyEntry, onResult: (Result<Unit>) -> Unit) {
+        pendingEntry = entry
+        pendingCallback = onResult
+        mainHandler.removeCallbacks(flushPendingRunnable)
+        mainHandler.postDelayed(flushPendingRunnable, SAVE_DEBOUNCE_MS)
+    }
+
+    /** Writes a debounced edit right now, if there is one. Main thread only. */
+    fun flushPendingSave() {
+        mainHandler.removeCallbacks(flushPendingRunnable)
+        val entry = pendingEntry ?: return
+        val callback = pendingCallback ?: return
+        pendingEntry = null
+        pendingCallback = null
+        saveEntry(entry, callback)
+    }
+
     fun saveEntry(entry: DailyEntry, onResult: (Result<Unit>) -> Unit) {
+        // A direct save carries the newest full entry, so any waiting debounced edit is obsolete.
+        mainHandler.removeCallbacks(flushPendingRunnable)
+        pendingEntry = null
+        pendingCallback = null
         executor.execute {
             val result = runCatching {
                 require(entry.date == LocalDate.now(ZoneId.systemDefault())) {
@@ -263,6 +293,7 @@ internal class DailyEntryRepository(context: Context) {
 
     private companion object {
         const val MAX_DESCRIPTION_LENGTH = 5_000
+        const val SAVE_DEBOUNCE_MS = 500L
         const val DATABASE_NAME = "dailytracker.db"
         const val DATABASE_VERSION = 1
         const val TABLE_DAILY_ENTRIES = "daily_entries"
