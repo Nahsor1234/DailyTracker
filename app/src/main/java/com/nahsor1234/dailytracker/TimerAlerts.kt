@@ -87,14 +87,16 @@ internal object TimerAlerts {
     /** [deadlineElapsedRealtime] uses the same clock as the countdown itself. */
     fun schedule(context: Context, deadlineElapsedRealtime: Long) {
         val app = context.applicationContext
-        AlarmNotifications.ensureChannels(app)
+        runCatching { AlarmNotifications.ensureChannels(app) }
         val wallDeadline = System.currentTimeMillis() + (deadlineElapsedRealtime - SystemClock.elapsedRealtime())
         ExactAlarms.set(app, wallDeadline, alarmIntent(app), asAlarmClock = true)
-        alarmPrefs(app).edit()
-            .putLong(KEY_WALL, wallDeadline)
-            .putLong(KEY_ELAPSED, deadlineElapsedRealtime)
-            .putInt(KEY_BOOT, bootCount(app))
-            .commit()
+        runCatching {
+            alarmPrefs(app).edit()
+                .putLong(KEY_WALL, wallDeadline)
+                .putLong(KEY_ELAPSED, deadlineElapsedRealtime)
+                .putInt(KEY_BOOT, bootCount(app))
+                .commit()
+        }
     }
 
     fun cancel(context: Context) {
@@ -119,14 +121,16 @@ internal object TimerAlerts {
      * The countdown deadline on the current elapsed-realtime clock. After a reboot the saved value
      * means nothing, so it is rebuilt from the wall-clock deadline.
      */
-    fun reconcileDeadline(context: Context, savedDeadline: Long): Long {
+    fun reconcileDeadline(context: Context, savedDeadline: Long): Long = runCatching {
         val app = context.applicationContext
         val prefs = alarmPrefs(app)
         val wall = prefs.getLong(KEY_WALL, 0L)
-        if (wall == 0L) return savedDeadline
-        if (prefs.getInt(KEY_BOOT, -1) == bootCount(app)) return prefs.getLong(KEY_ELAPSED, savedDeadline)
-        return SystemClock.elapsedRealtime() + (wall - System.currentTimeMillis())
-    }
+        when {
+            wall == 0L -> savedDeadline
+            prefs.getInt(KEY_BOOT, -1) == bootCount(app) -> prefs.getLong(KEY_ELAPSED, savedDeadline)
+            else -> SystemClock.elapsedRealtime() + (wall - System.currentTimeMillis())
+        }
+    }.getOrDefault(savedDeadline)
 
     /** Re-arms a running countdown after a reboot or a clock/time-zone change. */
     fun restore(context: Context) {

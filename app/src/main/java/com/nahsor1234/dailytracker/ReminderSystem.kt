@@ -166,10 +166,12 @@ internal class ReminderAlarmReceiver : BroadcastReceiver() {
 
         // Arm the next occurrence before showing anything, so a daily reminder keeps coming even
         // if showing this one fails.
-        if (reminder.daily) {
-            ReminderScheduler.schedule(context, reminder)
-        } else {
-            store.upsert(reminder.copy(enabled = false))
+        runCatching {
+            if (reminder.daily) {
+                ReminderScheduler.schedule(context, reminder)
+            } else {
+                store.upsert(reminder.copy(enabled = false))
+            }
         }
         AlarmRinging.deliver(context, RingRequest.forReminder(reminder))
     }
@@ -184,8 +186,8 @@ internal class ReminderRescheduleReceiver : BroadcastReceiver() {
             Intent.ACTION_TIMEZONE_CHANGED,
             Intent.ACTION_MY_PACKAGE_REPLACED,
             "android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" -> {
-                ReminderScheduler.rescheduleAll(context)
-                TimerAlerts.restore(context)
+                runCatching { ReminderScheduler.rescheduleAll(context) }
+                runCatching { TimerAlerts.restore(context) }
             }
         }
     }

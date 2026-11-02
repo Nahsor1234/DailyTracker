@@ -21,6 +21,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.util.Log
 
 /**
  * Rings an alarm or a finished countdown: loops the sound and vibration until the user dismisses
@@ -189,7 +190,15 @@ internal object AlarmRinging {
     /** Shows [ring] now: ringing for alarms and countdowns, a notification for plain reminders. */
     fun deliver(context: Context, ring: RingRequest) {
         val app = context.applicationContext
-        AlarmNotifications.ensureChannels(app)
+        runCatching { AlarmNotifications.ensureChannels(app) }
+        try {
+            show(app, ring)
+        } catch (e: Exception) {
+            Log.e("DailyTracker", "Could not show alert", e)
+        }
+    }
+
+    private fun show(app: Context, ring: RingRequest) {
         when {
             !ring.alarm -> AlarmNotifications.postPlain(app, ring, AlarmNotifications.CHANNEL_REMINDERS)
             // Muted countdown: nothing should make noise, so no service and no wake lock.
@@ -278,18 +287,39 @@ internal class AlarmActionReceiver : BroadcastReceiver() {
  * do not put an alarm icon in the status bar, and fall back to an alarm-clock alarm otherwise.
  */
 internal object ExactAlarms {
+    private const val TAG = "DailyTracker"
+
+    /**
+     * Never throws: a scheduling failure must not crash the app (a saved reminder would then crash
+     * it again on every launch). Each attempt is simpler than the one before it, so the alarm is
+     * at worst a little less exact instead of missing.
+     */
     fun set(context: Context, triggerAtMillis: Long, operation: PendingIntent, asAlarmClock: Boolean) {
-        val manager = context.getSystemService(AlarmManager::class.java)
-        val exactAllowed = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || manager.canScheduleExactAlarms()
-        if (!asAlarmClock && exactAllowed) {
+        val manager = context.getSystemService(AlarmManager::class.java) ?: return
+        val exactAllowed = runCatching {
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.S || manager.canScheduleExactAlarms()
+        }.getOrDefault(false)
+
+        val attempts = buildList<Pair<String, () -> Unit>> {
+            if (!asAlarmClock && exactAllowed) {
+                add("exact" to { manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation) })
+            }
+            add("alarm clock" to {
+                manager.setAlarmClock(AlarmManager.AlarmClockInfo(triggerAtMillis, openAppIntent(context)), operation)
+            })
+            if (exactAllowed) {
+                add("exact (fallback)" to { manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation) })
+            }
+            add("inexact" to { manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation) })
+        }
+        for ((name, attempt) in attempts) {
             try {
-                manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation)
+                attempt()
                 return
-            } catch (_: SecurityException) {
-                // The permission was revoked between the check and the call.
+            } catch (e: Exception) {
+                Log.w(TAG, "Scheduling a $name alarm failed", e)
             }
         }
-        manager.setAlarmClock(AlarmManager.AlarmClockInfo(triggerAtMillis, openAppIntent(context)), operation)
     }
 
     fun openAppIntent(context: Context): PendingIntent =
