@@ -1,8 +1,6 @@
 package com.nahsor1234.dailytracker
 
 import android.app.AlarmManager
-import android.app.Notification
-import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -18,6 +16,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.provider.Settings
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -66,51 +65,85 @@ internal object TimerAlertState {
 }
 
 /**
- * Schedules the "countdown finished" alert with the system, so it still fires when the app is in
- * the background or has been closed, and shows it as a notification.
+ * Schedules the "countdown finished" alert with the system, so it still rings when the app is in
+ * the background or has been closed. The ringing itself is done by [AlarmRingService].
+ *
+ * The countdown runs on the elapsed-realtime clock, but alarms are set on the wall clock, and the
+ * elapsed clock restarts from zero on reboot. So the deadline is also kept in wall-clock terms,
+ * which is what lets a countdown survive a restart.
  */
 internal object TimerAlerts {
     const val ACTION_FINISHED = "com.nahsor1234.dailytracker.action.TIMER_FINISHED"
+
+    /** Id earlier versions used for the "finished" notification; still cleared when the app opens. */
     const val NOTIFICATION_ID = 7001
-    private const val CHANNEL_PREFIX = "dailytracker_timer_"
+    private const val ALARM_REQUEST_CODE = 7001
+    private const val ALARM_PREFS = "timer_alarm"
+    private const val KEY_WALL = "wall_deadline"
+    private const val KEY_ELAPSED = "elapsed_deadline"
+    private const val KEY_BOOT = "boot_count"
     private val VIBRATION_PATTERN = longArrayOf(0, 600, 300, 600, 300, 900)
 
-    fun canScheduleExactAlarms(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
-        return context.applicationContext
-            .getSystemService(AlarmManager::class.java)
-            .canScheduleExactAlarms()
-    }
-
     /** [deadlineElapsedRealtime] uses the same clock as the countdown itself. */
-    fun schedule(context: Context, deadlineElapsedRealtime: Long): Boolean {
+    fun schedule(context: Context, deadlineElapsedRealtime: Long) {
         val app = context.applicationContext
-        ensureChannel(app, TimerAlertSettings(app))
-        val manager = app.getSystemService(AlarmManager::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !manager.canScheduleExactAlarms()) {
-            return false
-        }
-
-        return try {
-            manager.setExactAndAllowWhileIdle(
-                AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                deadlineElapsedRealtime,
-                alarmIntent(app)
-            )
-            true
-        } catch (_: SecurityException) {
-            // Permission can be revoked between the check and the scheduling call.
-            false
+        runCatching { AlarmNotifications.ensureChannels(app) }
+        val wallDeadline = System.currentTimeMillis() + (deadlineElapsedRealtime - SystemClock.elapsedRealtime())
+        ExactAlarms.set(app, wallDeadline, alarmIntent(app), asAlarmClock = true)
+        runCatching {
+            alarmPrefs(app).edit()
+                .putLong(KEY_WALL, wallDeadline)
+                .putLong(KEY_ELAPSED, deadlineElapsedRealtime)
+                .putInt(KEY_BOOT, bootCount(app))
+                .commit()
         }
     }
 
     fun cancel(context: Context) {
         val app = context.applicationContext
         app.getSystemService(AlarmManager::class.java).cancel(alarmIntent(app))
+        clearSchedule(app)
     }
 
+    /** Forgets the saved deadline: the alert has fired or been cancelled. */
+    fun clearSchedule(context: Context) {
+        alarmPrefs(context.applicationContext).edit().clear().commit()
+    }
+
+    /** Silences the countdown alert if it is ringing, and clears its notification. */
     fun dismissNotification(context: Context) {
-        context.applicationContext.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+        val app = context.applicationContext
+        AlarmRinging.stop(app, RingRequest.SOURCE_TIMER)
+        app.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+    }
+
+    /**
+     * The countdown deadline on the current elapsed-realtime clock. After a reboot the saved value
+     * means nothing, so it is rebuilt from the wall-clock deadline.
+     */
+    fun reconcileDeadline(context: Context, savedDeadline: Long): Long = runCatching {
+        val app = context.applicationContext
+        val prefs = alarmPrefs(app)
+        val wall = prefs.getLong(KEY_WALL, 0L)
+        when {
+            wall == 0L -> savedDeadline
+            prefs.getInt(KEY_BOOT, -1) == bootCount(app) -> prefs.getLong(KEY_ELAPSED, savedDeadline)
+            else -> SystemClock.elapsedRealtime() + (wall - System.currentTimeMillis())
+        }
+    }.getOrDefault(savedDeadline)
+
+    /** Re-arms a running countdown after a reboot or a clock/time-zone change. */
+    fun restore(context: Context) {
+        val app = context.applicationContext
+        if (alarmPrefs(app).getLong(KEY_WALL, 0L) == 0L) return
+        val deadline = reconcileDeadline(app, 0L)
+        if (deadline > SystemClock.elapsedRealtime()) {
+            schedule(app, deadline)
+        } else {
+            // It ran out while the phone was off; leave a note rather than ringing late.
+            clearSchedule(app)
+            AlarmNotifications.postMissed(app, RingRequest.forTimer(app))
+        }
     }
 
     fun notificationsAllowed(context: Context): Boolean =
@@ -119,75 +152,18 @@ internal object TimerAlerts {
                 context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED)
 
-    /**
-     * Channel settings cannot be changed after creation, so the sound/vibration choice is part
-     * of the channel id. Older timer channels are removed so the system settings list stays tidy.
-     */
-    private fun channelId(settings: TimerAlertSettings): String =
-        CHANNEL_PREFIX +
-            (if (settings.soundEnabled) "s" else "q") +
-            (if (settings.vibrationEnabled) "v" else "q") +
-            (if (settings.soundEnabled) settings.soundUri().toString().hashCode().toUInt().toString(16) else "")
+    private fun alarmPrefs(context: Context) =
+        context.getSharedPreferences(ALARM_PREFS, Context.MODE_PRIVATE)
 
-    fun ensureChannel(context: Context, settings: TimerAlertSettings): String {
-        val id = channelId(settings)
-        val manager = context.getSystemService(NotificationManager::class.java)
-        if (manager.getNotificationChannel(id) == null) {
-            manager.notificationChannels
-                .filter { it.id.startsWith(CHANNEL_PREFIX) && it.id != id }
-                .forEach { manager.deleteNotificationChannel(it.id) }
-            val channel = NotificationChannel(id, "Countdown timer", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "Alert when a countdown finishes"
-                if (settings.soundEnabled) {
-                    setSound(
-                        settings.soundUri(),
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ALARM)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                            .build()
-                    )
-                } else {
-                    setSound(null, null)
-                }
-                enableVibration(settings.vibrationEnabled)
-                if (settings.vibrationEnabled) vibrationPattern = VIBRATION_PATTERN
-            }
-            manager.createNotificationChannel(channel)
-        }
-        return id
-    }
-
-    fun postFinishedNotification(context: Context) {
-        val app = context.applicationContext
-        if (!notificationsAllowed(app)) return
-        val channel = ensureChannel(app, TimerAlertSettings(app))
-        val notification = Notification.Builder(app, channel)
-            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-            .setContentTitle("Time is up")
-            .setContentText("Your countdown has finished.")
-            .setCategory(Notification.CATEGORY_ALARM)
-            .setAutoCancel(true)
-            .setTimeoutAfter(5 * 60_000L)
-            .setContentIntent(openAppIntent(app))
-            .build()
-        app.getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification)
-    }
+    private fun bootCount(context: Context): Int =
+        runCatching { Settings.Global.getInt(context.contentResolver, Settings.Global.BOOT_COUNT) }
+            .getOrDefault(-1)
 
     private fun alarmIntent(context: Context): PendingIntent =
         PendingIntent.getBroadcast(
             context,
-            NOTIFICATION_ID,
+            ALARM_REQUEST_CODE,
             Intent(context, TimerAlarmReceiver::class.java).setAction(ACTION_FINISHED),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-    private fun openAppIntent(context: Context): PendingIntent =
-        PendingIntent.getActivity(
-            context,
-            NOTIFICATION_ID,
-            Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -198,8 +174,9 @@ internal object TimerAlerts {
 internal class TimerAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != TimerAlerts.ACTION_FINISHED) return
+        TimerAlerts.clearSchedule(context)
         if (TimerAlertState.appInForeground) return
-        TimerAlerts.postFinishedNotification(context)
+        AlarmRinging.deliver(context, RingRequest.forTimer(context))
     }
 }
 

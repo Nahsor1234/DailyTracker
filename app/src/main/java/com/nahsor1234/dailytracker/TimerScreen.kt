@@ -6,7 +6,6 @@ import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
-import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
@@ -28,17 +27,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.LocalSaveableStateRegistry
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -75,7 +71,25 @@ import kotlin.math.sin
 private enum class TimerMode { STOPWATCH, COUNTDOWN }
 
 private const val DEFAULT_COUNTDOWN_MINUTES = 25L
-private const val MAX_COUNTDOWN_MINUTES = 599L
+private const val MAX_COUNTDOWN_MINUTES = 999L
+
+private class TimerStateStore(context: android.content.Context) {
+    private val prefs = context.applicationContext.getSharedPreferences("timer_state", android.content.Context.MODE_PRIVATE)
+    fun long(key: String, fallback: Long = 0L) = prefs.getLong(key, fallback)
+    fun bool(key: String, fallback: Boolean = false) = prefs.getBoolean(key, fallback)
+    fun string(key: String, fallback: String) = prefs.getString(key, fallback) ?: fallback
+    fun save(
+        mode: String, watchBase: Long, watchStarted: Long, watchRunning: Boolean,
+        minutes: String, remaining: Long, deadline: Long, countdownRunning: Boolean, finished: Boolean
+    ) {
+        prefs.edit()
+            .putString("mode", mode).putLong("watch_base", watchBase)
+            .putLong("watch_started", watchStarted).putBoolean("watch_running", watchRunning)
+            .putString("minutes", minutes).putLong("remaining", remaining)
+            .putLong("deadline", deadline).putBoolean("countdown_running", countdownRunning)
+            .putBoolean("finished", finished).apply()
+    }
+}
 private val DurationPresets = listOf(5, 15, 25, 45, 60)
 private val ModeSegmentWidth = 120.dp // (248dp pill - 2 * 4dp padding) / 2 segments
 
@@ -241,20 +255,21 @@ internal fun TimerScreenWarmUp(enabled: Boolean, modifier: Modifier = Modifier) 
 
 @Composable
 internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) {
-    var mode by rememberSaveable { mutableStateOf(TimerMode.STOPWATCH) }
-    var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
-    var watchElapsedBase by rememberSaveable { mutableLongStateOf(0L) }
-    var watchStartedAt by rememberSaveable { mutableLongStateOf(0L) }
-    var watchRunning by rememberSaveable { mutableStateOf(false) }
-    var minutesText by rememberSaveable { mutableStateOf(DEFAULT_COUNTDOWN_MINUTES.toString()) }
-    var remainingBase by rememberSaveable { mutableLongStateOf(DEFAULT_COUNTDOWN_MINUTES * 60_000L) }
-    var countdownDeadline by rememberSaveable { mutableLongStateOf(0L) }
-    var countdownRunning by rememberSaveable { mutableStateOf(false) }
-    var finished by rememberSaveable { mutableStateOf(false) }
-    var showExactAlarmPermissionDialog by rememberSaveable { mutableStateOf(false) }
-    var startCountdownAfterPermission by rememberSaveable { mutableStateOf(false) }
-
     val context = LocalContext.current
+    val timerStore = remember { TimerStateStore(context) }
+    var mode by remember { mutableStateOf(runCatching { TimerMode.valueOf(timerStore.string("mode", TimerMode.STOPWATCH.name)) }.getOrDefault(TimerMode.STOPWATCH)) }
+    var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    var watchElapsedBase by remember { mutableLongStateOf(timerStore.long("watch_base")) }
+    var watchStartedAt by remember { mutableLongStateOf(timerStore.long("watch_started")) }
+    var watchRunning by remember { mutableStateOf(timerStore.bool("watch_running")) }
+    var minutesText by remember { mutableStateOf(timerStore.string("minutes", DEFAULT_COUNTDOWN_MINUTES.toString())) }
+    var remainingBase by remember { mutableLongStateOf(timerStore.long("remaining", DEFAULT_COUNTDOWN_MINUTES * 60_000L)) }
+    var countdownDeadline by remember {
+        mutableLongStateOf(TimerAlerts.reconcileDeadline(context, timerStore.long("deadline")))
+    }
+    var countdownRunning by remember { mutableStateOf(timerStore.bool("countdown_running")) }
+    var finished by remember { mutableStateOf(timerStore.bool("finished")) }
+
     val haptics = rememberHaptics()
     val alertSettings = remember { TimerAlertSettings(context) }
     var soundOn by remember { mutableStateOf(alertSettings.soundEnabled) }
@@ -298,6 +313,13 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
         now = SystemClock.elapsedRealtime()
     }
 
+    LaunchedEffect(mode, watchElapsedBase, watchStartedAt, watchRunning, minutesText, remainingBase, countdownDeadline, countdownRunning, finished) {
+        timerStore.save(
+            mode.name, watchElapsedBase, watchStartedAt, watchRunning,
+            minutesText, remainingBase, countdownDeadline, countdownRunning, finished
+        )
+    }
+
     val watchElapsed = watchElapsedBase +
         if (watchRunning) (now - watchStartedAt).coerceAtLeast(0L) else 0L
     val remaining = if (countdownRunning)
@@ -329,38 +351,19 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
     val startCountdown: () -> Unit = {
         val startedAt = SystemClock.elapsedRealtime()
         val deadline = startedAt + remainingBase
-        if (TimerAlerts.schedule(context, deadline)) {
-            now = startedAt
-            countdownDeadline = deadline
-            finished = false
-            countdownRunning = true
-            TimerAlarmPlayer.stop(context)
-            val allowed = TimerAlerts.notificationsAllowed(context)
-            notificationsBlocked = !allowed
-            if (!allowed && Build.VERSION.SDK_INT >= 33 &&
-                !alertSettings.notificationPermissionAsked
-            ) {
-                alertSettings.notificationPermissionAsked = true
-                notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        } else {
-            // Do not start a countdown whose background alert could not be scheduled.
-            startCountdownAfterPermission = true
-            showExactAlarmPermissionDialog = true
-        }
-    }
-
-    val exactAlarmSettings = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) {
-        val granted = TimerAlerts.canScheduleExactAlarms(context)
-        if (granted && startCountdownAfterPermission) {
-            startCountdownAfterPermission = false
-            showExactAlarmPermissionDialog = false
-            startCountdown()
-        } else {
-            startCountdownAfterPermission = false
-            showExactAlarmPermissionDialog = false
+        TimerAlerts.schedule(context, deadline)
+        now = startedAt
+        countdownDeadline = deadline
+        finished = false
+        countdownRunning = true
+        TimerAlarmPlayer.stop(context)
+        val allowed = TimerAlerts.notificationsAllowed(context)
+        notificationsBlocked = !allowed
+        if (!allowed && Build.VERSION.SDK_INT >= 33 &&
+            !alertSettings.notificationPermissionAsked
+        ) {
+            alertSettings.notificationPermissionAsked = true
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 
@@ -372,47 +375,6 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
             remainingBase = parsed * 60_000L
             finished = false
         }
-    }
-
-    if (showExactAlarmPermissionDialog) {
-        AlertDialog(
-            onDismissRequest = {
-                showExactAlarmPermissionDialog = false
-                startCountdownAfterPermission = false
-            },
-            title = { Text("Allow exact alarms") },
-            text = {
-                Text(
-                    "DailyTracker needs Alarms & reminders access to alert you when the countdown " +
-                        "finishes, including when the app is in the background."
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
-                            data = Uri.parse("package:${context.packageName}")
-                        }
-                        runCatching { exactAlarmSettings.launch(intent) }.onFailure {
-                            showExactAlarmPermissionDialog = false
-                            startCountdownAfterPermission = false
-                        }
-                    }
-                ) {
-                    Text("Grant permission")
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        showExactAlarmPermissionDialog = false
-                        startCountdownAfterPermission = false
-                    }
-                ) {
-                    Text("Not now")
-                }
-            }
-        )
     }
 
     Surface(modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -495,12 +457,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
                             countdownRunning = false
                             TimerAlerts.cancel(context)
                         } else if (remainingBase > 0L) {
-                            if (!TimerAlerts.canScheduleExactAlarms(context)) {
-                                startCountdownAfterPermission = true
-                                showExactAlarmPermissionDialog = true
-                            } else {
-                                startCountdown()
-                            }
+                            startCountdown()
                         }
                     },
                     onReset = {

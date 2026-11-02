@@ -6,7 +6,6 @@ import android.content.Intent
 import android.net.Uri
 import android.media.RingtoneManager
 import android.os.Build
-import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -164,6 +163,8 @@ internal fun ReminderScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(4.dp))
             Text("Keep your day on track, at the right time.",
                 color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(18.dp))
+            AlarmReliabilityCard()
             Spacer(Modifier.height(22.dp))
 
             BoxWithConstraints(
@@ -288,31 +289,6 @@ internal fun ReminderScreen(onBack: () -> Unit) {
                             )
                         }
                         ringtonePicker.launch(pickerIntent)
-                    }
-                    Spacer(Modifier.height(12.dp))
-                }
-
-                if (kind == ReminderKind.ALARM && !ReminderScheduler.canScheduleExact(context)) {
-                    Column(
-                        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
-                            .background(colors.primary.copy(alpha = 0.07f)).padding(12.dp)
-                    ) {
-                        Text("Exact alarm access is off", color = colors.onSurface,
-                            style = MaterialTheme.typography.labelLarge)
-                        Spacer(Modifier.height(4.dp))
-                        Text("Android may deliver this alarm a little late until exact access is enabled.",
-                            color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-                        TextButton(onClick = {
-                            haptics.click()
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                context.startActivity(
-                                    Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
-                                        Uri.parse("package:${context.packageName}"))
-                                )
-                            }
-                        }, contentPadding = PaddingValues(0.dp)) {
-                            Text("Allow exact alarms")
-                        }
                     }
                     Spacer(Modifier.height(12.dp))
                 }
