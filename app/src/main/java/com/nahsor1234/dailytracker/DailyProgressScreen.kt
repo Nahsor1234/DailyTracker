@@ -526,41 +526,29 @@ private fun MonthCalendar(
         }
         Spacer(Modifier.height(8.dp))
 
-        AnimatedContent(
-            targetState = month,
-            transitionSpec = {
-                val direction = if (targetState > initialState) 1 else -1
-                ((slideInHorizontally(tween(340)) { it * direction / 4 } + fadeIn(tween(240))) togetherWith
-                    (slideOutHorizontally(tween(340)) { -it * direction / 4 } + fadeOut(tween(160))))
-                    // The grid always has six rows, so its size never changes between months.
-                    .using(SizeTransform(clip = false) { _, _ -> snap() })
-            },
-            label = "calendar-grid"
-        ) { shownMonth ->
-            // Each grid uses its own month's data, so the outgoing grid keeps its markers while it
-            // slides away instead of switching to the new month's data mid-animation.
-            val completed = completedFor(shownMonth)
-            val days = remember(shownMonth, locale) {
-                val built = buildCalendarDays(shownMonth, firstDayOfWeek)
-                built + List((42 - built.size).coerceAtLeast(0)) { null }
-            }
-            Column(Modifier.fillMaxWidth()) {
-                days.chunked(7).forEach { week ->
-                    Row(Modifier.fillMaxWidth()) {
-                        week.forEach { date ->
-                            if (date == null) {
-                                Spacer(Modifier.weight(1f).aspectRatio(1f).padding(2.dp))
-                            } else {
-                                CalendarDayCell(
-                                    date = date,
-                                    isToday = date == today,
-                                    isSelected = date == selectedDate,
-                                    isCompleted = date in completed,
-                                    isFuture = date.isAfter(today),
-                                    onClick = { onSelectDate(date) },
-                                    modifier = Modifier.weight(1f).aspectRatio(1f).padding(2.dp)
-                                )
-                            }
+        // Render one 42-cell grid at a time. Keeping outgoing and incoming grids alive
+        // during AnimatedContent doubled the calendar's composition and drawing work.
+        val completed = completedFor(month)
+        val days = remember(month, locale) {
+            val built = buildCalendarDays(month, firstDayOfWeek)
+            built + List((42 - built.size).coerceAtLeast(0)) { null }
+        }
+        Column(Modifier.fillMaxWidth()) {
+            days.chunked(7).forEach { week ->
+                Row(Modifier.fillMaxWidth()) {
+                    week.forEach { date ->
+                        if (date == null) {
+                            Spacer(Modifier.weight(1f).aspectRatio(1f).padding(2.dp))
+                        } else {
+                            CalendarDayCell(
+                                date = date,
+                                isToday = date == today,
+                                isSelected = date == selectedDate,
+                                isCompleted = date in completed,
+                                isFuture = date.isAfter(today),
+                                onClick = { onSelectDate(date) },
+                                modifier = Modifier.weight(1f).aspectRatio(1f).padding(2.dp)
+                            )
                         }
                     }
                 }
