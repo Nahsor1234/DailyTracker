@@ -71,6 +71,7 @@ internal object TimerAlertState {
  */
 internal object TimerAlerts {
     const val ACTION_FINISHED = "com.nahsor1234.dailytracker.action.TIMER_FINISHED"
+    const val ACTION_DISMISS = "com.nahsor1234.dailytracker.action.DISMISS_TIMER"
     const val NOTIFICATION_ID = 7001
     private const val CHANNEL_PREFIX = "dailytracker_timer_"
     private val VIBRATION_PATTERN = longArrayOf(0, 600, 300, 600, 300, 900)
@@ -161,10 +162,18 @@ internal object TimerAlerts {
         val app = context.applicationContext
         if (!notificationsAllowed(app)) return
         val channel = ensureChannel(app, TimerAlertSettings(app))
+        val dismiss = PendingIntent.getBroadcast(
+            app,
+            NOTIFICATION_ID + 1,
+            Intent(app, TimerAlarmReceiver::class.java).setAction(ACTION_DISMISS),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val notification = Notification.Builder(app, channel)
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
             .setContentTitle("Time is up")
             .setContentText("Your countdown has finished.")
+            .setStyle(Notification.BigTextStyle().bigText("Your countdown has finished."))
+            .addAction(Notification.Action.Builder(null, "Stop", dismiss).build())
             .setCategory(Notification.CATEGORY_ALARM)
             .setAutoCancel(true)
             .setTimeoutAfter(5 * 60_000L)
@@ -197,7 +206,14 @@ internal object TimerAlerts {
 /** Fires at the countdown deadline. If the app is on screen it handles the alert itself. */
 internal class TimerAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != TimerAlerts.ACTION_FINISHED) return
+        when (intent.action) {
+            TimerAlerts.ACTION_DISMISS -> {
+                TimerAlerts.dismissNotification(context)
+                return
+            }
+            TimerAlerts.ACTION_FINISHED -> Unit
+            else -> return
+        }
         if (TimerAlertState.appInForeground) return
         TimerAlerts.postFinishedNotification(context)
     }
