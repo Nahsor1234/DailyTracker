@@ -94,6 +94,7 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         TimerAlertState.appInForeground = false
         TimerAlarmPlayer.stop(this)
+        repository.flushPendingSave()
         super.onStop()
     }
 
@@ -115,7 +116,9 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightNavigationBars = false
         }
         ReminderNotificationChannels.create(this)
-        ReminderScheduler.rescheduleAll(this)
+        // Re-arming alarms reads stored reminders from disk: keep that off the first frame.
+        val appContext = applicationContext
+        Thread({ ReminderScheduler.rescheduleAll(appContext) }, "dailytracker-reminders").start()
         authCallbackUri = intent?.data
         setContent {
             DailyTrackerTheme {
@@ -319,7 +322,7 @@ private fun DailyTrackerApp(
                             )
                     ) {
                         stateHolder.SaveableStateProvider(TrackerDestination.TIMER) {
-                            TimerScreen()
+                            TimerScreen(active = destination == TrackerDestination.TIMER)
                         }
                     }
                 }
