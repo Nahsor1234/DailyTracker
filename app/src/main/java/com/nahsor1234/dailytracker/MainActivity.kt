@@ -22,7 +22,10 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.ui.draw.drawWithContent
@@ -31,8 +34,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import kotlin.math.PI
 import kotlin.math.sin
@@ -79,6 +83,18 @@ class MainActivity : ComponentActivity() {
     }
     private val cloud by lazy(LazyThreadSafetyMode.NONE) {
         DailyTrackerCloud(applicationContext)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        TimerAlertState.appInForeground = true
+        TimerAlerts.dismissNotification(this)
+    }
+
+    override fun onStop() {
+        TimerAlertState.appInForeground = false
+        TimerAlarmPlayer.stop(this)
+        super.onStop()
     }
 
     override fun onResume() {
@@ -382,6 +398,56 @@ private fun DailyTrackerApp(
         ) {
             ReminderScreen(onBack = { showReminders = false })
         }
+
+        // Shown while the countdown alert is ringing, whichever screen is open.
+        AnimatedVisibility(
+            visible = TimerAlarmPlayer.ringing,
+            modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 68.dp),
+            enter = slideInVertically(tween(320, easing = FastOutSlowInEasing)) { -it } + fadeIn(tween(200)),
+            exit = slideOutVertically(tween(240, easing = FastOutSlowInEasing)) { -it } + fadeOut(tween(160))
+        ) {
+            TimerRingingBanner()
+        }
+    }
+}
+
+@Composable
+private fun TimerRingingBanner() {
+    val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val source = rememberPressSource()
+    val pulse by rememberInfiniteTransition(label = "ring-pulse").animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse),
+        label = "ring-pulse-value"
+    )
+    Row(
+        Modifier.pressScale(source, 0.96f)
+            .clip(CircleShape)
+            .background(Brush.horizontalGradient(listOf(Color(0xFF222E25), Color(0xFF161E18))))
+            .border(1.dp, scheme.primary.copy(alpha = 0.55f), CircleShape)
+            .hapticClickable(source, haptic = { heavy() }) {
+                TimerAlarmPlayer.stop(context)
+                TimerAlerts.dismissNotification(context)
+            }
+            .padding(start = 18.dp, end = 8.dp, top = 8.dp, bottom = 8.dp)
+            .semantics { contentDescription = "Time is up. Tap to stop the alert."; role = Role.Button },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier.size(9.dp).graphicsLayer { alpha = pulse }
+                .clip(CircleShape).background(scheme.primary)
+        )
+        Spacer(Modifier.width(10.dp))
+        Text("Time is up", color = scheme.onBackground, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.width(14.dp))
+        Box(
+            Modifier.clip(CircleShape).background(scheme.primary)
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            Text("Stop", color = scheme.onPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 
@@ -389,11 +455,12 @@ private fun DailyTrackerApp(
 private fun AccountEntryButton(onClick: () -> Unit, signedIn: Boolean, modifier: Modifier = Modifier) {
     val scheme = MaterialTheme.colorScheme
     val tint = if (signedIn) scheme.primary else scheme.onSurface
+    val source = rememberPressSource()
     Box(
-        modifier.size(44.dp).clip(CircleShape)
+        modifier.pressScale(source).size(44.dp).clip(CircleShape)
             .background(Color.White.copy(alpha = 0.045f))
             .border(1.dp, if (signedIn) scheme.primary.copy(alpha = 0.45f) else Color.White.copy(alpha = 0.09f), CircleShape)
-            .clickable(onClick = onClick)
+            .hapticClickable(source, onClick = onClick)
             .semantics {
                 contentDescription = if (signedIn) "Account, signed in" else "Account, sign in"
                 role = Role.Button
@@ -421,11 +488,12 @@ private fun AccountEntryButton(onClick: () -> Unit, signedIn: Boolean, modifier:
 @Composable
 private fun ReminderEntryButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
     val tint = MaterialTheme.colorScheme.onSurface
+    val source = rememberPressSource()
     Box(
-        modifier.size(44.dp).clip(CircleShape)
+        modifier.pressScale(source).size(44.dp).clip(CircleShape)
             .background(Color.White.copy(alpha = 0.045f))
             .border(1.dp, Color.White.copy(alpha = 0.09f), CircleShape)
-            .clickable(onClick = onClick),
+            .hapticClickable(source, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Canvas(Modifier.size(21.dp)) {
@@ -455,7 +523,7 @@ private fun FloatingNavigationBar(
     modifier: Modifier = Modifier
 ) {
     val scheme = MaterialTheme.colorScheme
-    val haptics = LocalHapticFeedback.current
+    val haptics = rememberHaptics()
     val selectedIndex = if (selected == TrackerDestination.PROGRESS) 0 else 1
     val itemWidth = 125.dp // (260dp bar - 2 * 5dp padding) / 2 items
 
@@ -514,7 +582,7 @@ private fun FloatingNavigationBar(
                     selected == TrackerDestination.PROGRESS,
                     {
                         if (selected != TrackerDestination.PROGRESS) {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            haptics.select()
                         }
                         onSelect(TrackerDestination.PROGRESS)
                     }, Modifier.weight(1f))
@@ -522,7 +590,7 @@ private fun FloatingNavigationBar(
                     selected == TrackerDestination.TIMER,
                     {
                         if (selected != TrackerDestination.TIMER) {
-                            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            haptics.select()
                         }
                         onSelect(TrackerDestination.TIMER)
                     }, Modifier.weight(1f))

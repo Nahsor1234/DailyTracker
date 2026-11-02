@@ -70,6 +70,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
     var ringtoneUri by remember { mutableStateOf<String?>(null) }
     var deleteConfirmation by remember { mutableStateOf<TrackerReminder?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
+    val haptics = rememberHaptics()
 
     val ringtonePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -107,12 +108,14 @@ internal fun ReminderScreen(onBack: () -> Unit) {
         val cleanTitle = title.trim()
         if (cleanTitle.isEmpty()) {
             message = "Add a name for this reminder."
+            haptics.reject()
             return
         }
         val now = java.time.ZonedDateTime.now()
         val scheduled = date.atTime(hour, minute)
         if (!daily && !scheduled.isAfter(now.toLocalDateTime())) {
             message = "Choose a future date and time."
+            haptics.reject()
             return
         }
         val id = editingId ?: System.currentTimeMillis()
@@ -132,6 +135,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
         refresh()
         resetEditor()
         message = "Reminder saved on this device."
+        haptics.confirm()
     }
 
     val notificationAllowed = remember {
@@ -147,7 +151,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
         ) {
             Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onBack, contentPadding = PaddingValues(horizontal = 0.dp)) {
+                TextButton(onClick = { haptics.click(); onBack() }, contentPadding = PaddingValues(horizontal = 0.dp)) {
                     Text("‹  Back", color = colors.primary, fontSize = 15.sp)
                 }
                 Spacer(Modifier.weight(1f))
@@ -183,6 +187,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
                         Box(
                             Modifier.weight(1f).clip(CircleShape)
                                 .clickable {
+                                    if (kind != option) haptics.select()
                                     kind = option
                                     message = null
                                 }.padding(vertical = 12.dp),
@@ -298,6 +303,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
                         Text("Android may deliver this alarm a little late until exact access is enabled.",
                             color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                         TextButton(onClick = {
+                            haptics.click()
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                                 context.startActivity(
                                     Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
@@ -313,6 +319,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
 
                 Button(
                     onClick = {
+                        haptics.click()
                         val allowed = context.getSystemService(android.app.NotificationManager::class.java)
                             .areNotificationsEnabled() &&
                             (Build.VERSION.SDK_INT < 33 ||
@@ -333,7 +340,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
                         fontWeight = FontWeight.SemiBold)
                 }
                 if (editingId != null) {
-                    TextButton(onClick = { resetEditor() }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                    TextButton(onClick = { haptics.click(); resetEditor() }, modifier = Modifier.align(Alignment.CenterHorizontally)) {
                         Text("Cancel editing", color = colors.onSurfaceVariant)
                     }
                 }
@@ -403,6 +410,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
                 text = { Text("\u201c" + reminder.title + "\u201d will be permanently removed.") },
                 confirmButton = {
                     TextButton(onClick = {
+                        haptics.heavy()
                         ReminderScheduler.cancel(context, reminder.id)
                         store.remove(reminder.id)
                         refresh()
@@ -411,7 +419,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
                     }) { Text("Delete", color = colors.error) }
                 },
                 dismissButton = {
-                    TextButton(onClick = { deleteConfirmation = null }) { Text("Cancel") }
+                    TextButton(onClick = { haptics.click(); deleteConfirmation = null }) { Text("Cancel") }
                 }
             )
         }
@@ -421,11 +429,12 @@ internal fun ReminderScreen(onBack: () -> Unit) {
 @Composable
 private fun RepeatChoice(label: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val source = rememberPressSource()
     Box(
-        modifier.height(42.dp).clip(CircleShape)
+        modifier.pressScale(source, 0.96f).height(42.dp).clip(CircleShape)
             .background(if (selected) colors.primary.copy(alpha = 0.16f) else Color.Transparent)
             .border(1.dp, if (selected) colors.primary.copy(alpha = 0.45f) else Color.White.copy(alpha = 0.12f), CircleShape)
-            .clickable(onClick = onClick),
+            .hapticClickable(source, haptic = { if (!selected) select() }, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Text(label, color = if (selected) colors.primary else colors.onSurfaceVariant,
@@ -436,10 +445,11 @@ private fun RepeatChoice(label: String, selected: Boolean, modifier: Modifier = 
 @Composable
 private fun SelectionRow(label: String, value: String, onClick: () -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val source = rememberPressSource()
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+        Modifier.pressScale(source, 0.98f).fillMaxWidth().clip(RoundedCornerShape(14.dp))
             .background(Color.Black.copy(alpha = 0.16f))
-            .clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 13.dp),
+            .hapticClickable(source, haptic = { click() }, onClick = onClick).padding(horizontal = 14.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
@@ -459,6 +469,7 @@ private fun ReminderListItem(
     onDelete: () -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
+    val haptics = rememberHaptics()
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
             .background(Color.White.copy(alpha = 0.035f))
@@ -488,19 +499,19 @@ private fun ReminderListItem(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 TextButton(
-                    onClick = onEdit,
+                    onClick = { haptics.click(); onEdit() },
                     contentPadding = PaddingValues(horizontal = 9.dp, vertical = 0.dp),
                     modifier = Modifier.height(30.dp)
                 ) { Text("Edit", color = colors.onSurfaceVariant, fontSize = 12.sp) }
                 TextButton(
-                    onClick = onDelete,
+                    onClick = { haptics.heavy(); onDelete() },
                     contentPadding = PaddingValues(horizontal = 9.dp, vertical = 0.dp),
                     modifier = Modifier.height(30.dp)
                 ) { Text("Delete", color = colors.error, fontSize = 12.sp) }
             }
         }
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Switch(checked = reminder.enabled, onCheckedChange = onToggle)
+            Switch(checked = reminder.enabled, onCheckedChange = { haptics.toggle(it); onToggle(it) })
             Text(if (reminder.enabled) "ON" else "OFF", color = colors.onSurfaceVariant,
                 fontSize = 9.sp, letterSpacing = 1.sp)
         }

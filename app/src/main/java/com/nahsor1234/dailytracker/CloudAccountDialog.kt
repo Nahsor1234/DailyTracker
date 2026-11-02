@@ -2,7 +2,11 @@ package com.nahsor1234.dailytracker
 
 import android.os.Handler
 import android.os.Looper
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,6 +26,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -65,6 +70,14 @@ internal fun CloudAccountDialog(
     var account by remember { mutableStateOf<DailyTrackerCloud.Account?>(null) }
     var creatingAccount by remember { mutableStateOf(false) }
     var showPassword by remember { mutableStateOf(false) }
+    val haptics = rememberHaptics()
+
+    // One haptic per outcome: success confirms, an error is rejected.
+    LaunchedEffect(message, messageIsError) {
+        if (message.isNotBlank()) {
+            if (messageIsError) haptics.reject() else haptics.confirm()
+        }
+    }
 
     val worker = remember(cloud) {
         Executors.newSingleThreadExecutor { task ->
@@ -236,8 +249,16 @@ internal fun CloudAccountDialog(
         onDismissRequest = { if (!busy) onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
+        // The card eases in (scale + fade) on top of the dialog window's own fade.
+        val entrance = remember { Animatable(0f) }
+        LaunchedEffect(Unit) { entrance.animateTo(1f, tween(320, easing = FastOutSlowInEasing)) }
         Box(
-            Modifier.padding(horizontal = 20.dp).widthIn(max = 420.dp).fillMaxWidth()
+            Modifier.graphicsLayer {
+                val t = entrance.value
+                scaleX = 0.93f + 0.07f * t
+                scaleY = 0.93f + 0.07f * t
+                alpha = t
+            }.padding(horizontal = 20.dp).widthIn(max = 420.dp).fillMaxWidth()
                 .clip(SheetShape)
                 .background(SheetBrush)
                 .border(1.dp, Hairline, SheetShape)
@@ -545,6 +566,7 @@ private fun AvatarBadge(initial: String?) {
 @Composable
 private fun ModeSwitch(creating: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
     val scheme = MaterialTheme.colorScheme
+    val haptics = rememberHaptics()
     Row(
         Modifier.fillMaxWidth().height(44.dp).clip(CircleShape)
             .border(1.dp, Hairline, CircleShape).padding(4.dp)
@@ -554,7 +576,10 @@ private fun ModeSwitch(creating: Boolean, enabled: Boolean, onChange: (Boolean) 
             Box(
                 Modifier.weight(1f).fillMaxHeight().clip(CircleShape)
                     .background(if (selected) scheme.primary.copy(alpha = 0.22f) else Color.Transparent)
-                    .clickable(enabled = enabled) { onChange(value) }
+                    .clickable(enabled = enabled) {
+                        if (!selected) haptics.select()
+                        onChange(value)
+                    }
                     .semantics { role = Role.Tab },
                 contentAlignment = Alignment.Center
             ) {
@@ -581,6 +606,7 @@ private fun AuthField(
     onToggleShow: () -> Unit = {}
 ) {
     val scheme = MaterialTheme.colorScheme
+    val haptics = rememberHaptics()
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
@@ -598,7 +624,7 @@ private fun AuthField(
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(end = 6.dp).clip(CircleShape)
-                        .clickable(onClick = onToggleShow).padding(horizontal = 10.dp, vertical = 6.dp)
+                        .clickable { haptics.tick(); onToggleShow() }.padding(horizontal = 10.dp, vertical = 6.dp)
                 )
             }
         } else null,
@@ -622,8 +648,11 @@ private fun AuthField(
 @Composable
 private fun PrimaryButton(text: String, enabled: Boolean, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
+    val haptics = rememberHaptics()
+    val source = remember { MutableInteractionSource() }
     Button(
-        onClick = onClick,
+        onClick = { haptics.click(); onClick() },
+        interactionSource = source,
         enabled = enabled,
         shape = CircleShape,
         colors = ButtonDefaults.buttonColors(
@@ -632,7 +661,7 @@ private fun PrimaryButton(text: String, enabled: Boolean, onClick: () -> Unit) {
             disabledContainerColor = scheme.primary.copy(alpha = 0.30f),
             disabledContentColor = scheme.onPrimary.copy(alpha = 0.60f)
         ),
-        modifier = Modifier.fillMaxWidth().height(52.dp)
+        modifier = Modifier.pressScale(source, 0.97f).fillMaxWidth().height(52.dp)
     ) { Text(text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold) }
 }
 
@@ -640,20 +669,24 @@ private fun PrimaryButton(text: String, enabled: Boolean, onClick: () -> Unit) {
 private fun SecondaryButton(text: String, enabled: Boolean, onClick: () -> Unit, destructive: Boolean = false) {
     val scheme = MaterialTheme.colorScheme
     val tint = if (destructive) scheme.error else scheme.onSurface
+    val haptics = rememberHaptics()
+    val source = remember { MutableInteractionSource() }
     OutlinedButton(
-        onClick = onClick,
+        onClick = { if (destructive) haptics.heavy() else haptics.click(); onClick() },
+        interactionSource = source,
         enabled = enabled,
         shape = CircleShape,
         border = androidx.compose.foundation.BorderStroke(1.dp, if (destructive) scheme.error.copy(alpha = 0.35f) else Hairline),
         colors = ButtonDefaults.outlinedButtonColors(contentColor = tint, disabledContentColor = tint.copy(alpha = 0.4f)),
-        modifier = Modifier.fillMaxWidth().height(48.dp)
+        modifier = Modifier.pressScale(source, 0.97f).fillMaxWidth().height(48.dp)
     ) { Text(text, fontSize = 14.sp, fontWeight = FontWeight.Medium) }
 }
 
 @Composable
 private fun LinkButton(text: String, enabled: Boolean, onClick: () -> Unit, muted: Boolean = false) {
     val scheme = MaterialTheme.colorScheme
-    TextButton(onClick = onClick, enabled = enabled) {
+    val haptics = rememberHaptics()
+    TextButton(onClick = { haptics.tick(); onClick() }, enabled = enabled) {
         Text(
             text,
             fontSize = 13.sp,

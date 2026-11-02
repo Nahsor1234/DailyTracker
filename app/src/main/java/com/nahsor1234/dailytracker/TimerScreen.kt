@@ -1,6 +1,13 @@
 package com.nahsor1234.dailytracker
 
+import android.Manifest
+import android.content.Intent
+import android.media.RingtoneManager
+import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
@@ -16,11 +23,15 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.LocalSaveableStateRegistry
@@ -41,15 +52,16 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
@@ -236,6 +248,33 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
     var countdownRunning by rememberSaveable { mutableStateOf(false) }
     var finished by rememberSaveable { mutableStateOf(false) }
 
+    val context = LocalContext.current
+    val haptics = rememberHaptics()
+    val alertSettings = remember { TimerAlertSettings(context) }
+    var soundOn by remember { mutableStateOf(alertSettings.soundEnabled) }
+    var vibrationOn by remember { mutableStateOf(alertSettings.vibrationEnabled) }
+    var ringtoneUri by remember { mutableStateOf(alertSettings.ringtoneUri) }
+    var notificationsBlocked by remember { mutableStateOf(false) }
+    val ringtoneTitle by produceState("Default alarm", ringtoneUri) {
+        value = withContext(Dispatchers.Default) {
+            runCatching {
+                ringtoneUri?.let { RingtoneManager.getRingtone(context, Uri.parse(it))?.getTitle(context) }
+            }.getOrNull() ?: "Default alarm"
+        }
+    }
+    val ringtonePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val picked = result.data?.getParcelableExtra<Uri>(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+            alertSettings.ringtoneUri = picked?.toString()
+            ringtoneUri = alertSettings.ringtoneUri
+        }
+    }
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> notificationsBlocked = !granted }
+
     LaunchedEffect(watchRunning, countdownRunning) {
         while (watchRunning || countdownRunning) {
             now = SystemClock.elapsedRealtime()
@@ -251,9 +290,19 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
 
     LaunchedEffect(countdownRunning, remaining) {
         if (countdownRunning && remaining <= 0L) {
+            val overdue = SystemClock.elapsedRealtime() - countdownDeadline
             remainingBase = 0L
             countdownRunning = false
             finished = true
+            // The screen handles the alert itself, so the system alarm is no longer needed.
+            TimerAlerts.cancel(context)
+            TimerAlerts.dismissNotification(context)
+            // Ring only if the countdown ended just now. If it ended while the app was away, the
+            // notification has already told the user.
+            if (overdue < 3_000L) {
+                haptics.confirm()
+                TimerAlarmPlayer.start(context, alertSettings)
+            }
         }
     }
 
@@ -264,6 +313,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
 
     val onMinutesChange: (String) -> Unit = { input ->
         minutesText = input
+        if (finished) TimerAlarmPlayer.stop(context)
         val parsed = input.toLongOrNull()?.takeIf { it in 1L..MAX_COUNTDOWN_MINUTES }
         if (parsed != null) {
             remainingBase = parsed * 60_000L
@@ -280,6 +330,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
             Spacer(Modifier.height(72.dp))
             TimerModeSelector(mode) {
                 mode = it
+                if (finished) TimerAlarmPlayer.stop(context)
                 finished = false
             }
             Spacer(Modifier.height(20.dp))
@@ -348,12 +399,23 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
                             remainingBase = (countdownDeadline - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
                             countdownDeadline = 0L
                             countdownRunning = false
+                            TimerAlerts.cancel(context)
                         } else if (remainingBase > 0L) {
                             val startedAt = SystemClock.elapsedRealtime()
                             now = startedAt
                             countdownDeadline = startedAt + remainingBase
                             finished = false
                             countdownRunning = true
+                            TimerAlarmPlayer.stop(context)
+                            TimerAlerts.schedule(context, countdownDeadline)
+                            val allowed = TimerAlerts.notificationsAllowed(context)
+                            notificationsBlocked = !allowed
+                            if (!allowed && Build.VERSION.SDK_INT >= 33 &&
+                                !alertSettings.notificationPermissionAsked
+                            ) {
+                                alertSettings.notificationPermissionAsked = true
+                                notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            }
                         }
                     },
                     onReset = {
@@ -361,20 +423,153 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
                         countdownDeadline = 0L
                         remainingBase = configuredMillis
                         finished = false
+                        TimerAlerts.cancel(context)
+                        TimerAlerts.dismissNotification(context)
+                        TimerAlarmPlayer.stop(context)
                     }
                 )
             }
 
-            Spacer(Modifier.height(20.dp))
-            Text(
-                "Alerts and sound aren't configured yet.",
-                Modifier.fillMaxWidth().alpha(0.6f),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
-            )
+            if (mode == TimerMode.COUNTDOWN) {
+                Spacer(Modifier.height(24.dp))
+                TimerAlertsCard(
+                    soundOn = soundOn,
+                    vibrationOn = vibrationOn,
+                    soundName = ringtoneTitle,
+                    notificationsBlocked = notificationsBlocked,
+                    onSoundChange = {
+                        soundOn = it
+                        alertSettings.soundEnabled = it
+                        haptics.toggle(it)
+                    },
+                    onVibrationChange = {
+                        vibrationOn = it
+                        alertSettings.vibrationEnabled = it
+                        haptics.toggle(it)
+                    },
+                    onPickSound = {
+                        haptics.click()
+                        val existing = ringtoneUri?.let(Uri::parse)
+                        ringtonePicker.launch(
+                            Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                                putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
+                                putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "Timer sound")
+                                putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                                putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, false)
+                                putExtra(
+                                    RingtoneManager.EXTRA_RINGTONE_EXISTING_URI,
+                                    existing ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                                )
+                            }
+                        )
+                    },
+                    onTest = {
+                        TimerAlarmPlayer.start(context, alertSettings, 3_000L)
+                    }
+                )
+            }
             Spacer(Modifier.navigationBarsPadding().height(120.dp))
         }
+    }
+}
+
+@Composable
+private fun TimerAlertsCard(
+    soundOn: Boolean,
+    vibrationOn: Boolean,
+    soundName: String,
+    notificationsBlocked: Boolean,
+    onSoundChange: (Boolean) -> Unit,
+    onVibrationChange: (Boolean) -> Unit,
+    onPickSound: () -> Unit,
+    onTest: () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(24.dp)
+    val testSource = rememberPressSource()
+    Column(
+        Modifier.fillMaxWidth().clip(shape)
+            .background(Color.White.copy(alpha = 0.035f))
+            .border(1.dp, Color.White.copy(alpha = 0.08f), shape)
+            .padding(horizontal = 18.dp, vertical = 16.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "WHEN TIME IS UP", color = colors.primary,
+                style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.8.sp)
+            )
+            Spacer(Modifier.weight(1f))
+            Box(
+                Modifier.pressScale(testSource).clip(CircleShape)
+                    .border(1.dp, colors.primary.copy(alpha = 0.45f), CircleShape)
+                    .hapticClickable(testSource, haptic = { click() }, onClick = onTest)
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+            ) {
+                Text("Test", color = colors.primary, style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.Medium))
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        AlertToggleRow(
+            title = "Sound",
+            subtitle = if (soundOn) soundName else "Off",
+            checked = soundOn,
+            onCheckedChange = onSoundChange,
+            onBodyClick = if (soundOn) onPickSound else null
+        )
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+        AlertToggleRow(
+            title = "Vibration",
+            subtitle = if (vibrationOn) "On" else "Off",
+            checked = vibrationOn,
+            onCheckedChange = onVibrationChange,
+            onBodyClick = null
+        )
+        if (notificationsBlocked) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Notifications are blocked, so the alert can't reach you while the app is closed. " +
+                    "Turn them on for DailyTracker in system settings.",
+                color = colors.error,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
+}
+
+@Composable
+private fun AlertToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    onBodyClick: (() -> Unit)?
+) {
+    val colors = MaterialTheme.colorScheme
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(
+            Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
+                .then(if (onBodyClick != null) Modifier.clickable(onClick = onBodyClick) else Modifier)
+                .padding(vertical = 6.dp)
+        ) {
+            Text(title, color = colors.onSurface, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                if (onBodyClick != null) "$subtitle  ›" else subtitle,
+                color = colors.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = colors.onPrimary,
+                checkedTrackColor = colors.primary,
+                uncheckedThumbColor = colors.onSurfaceVariant,
+                uncheckedTrackColor = Color.White.copy(alpha = 0.08f),
+                uncheckedBorderColor = Color.White.copy(alpha = 0.18f)
+            )
+        )
     }
 }
 
@@ -410,6 +605,7 @@ private fun TimeReadout(main: String, tenths: String?, status: String) {
 private fun TimerModeSelector(mode: TimerMode, onModeChange: (TimerMode) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val selectedIndex = if (mode == TimerMode.STOPWATCH) 0 else 1
+    val haptics = rememberHaptics()
     // The pill has a fixed size, so no BoxWithConstraints (a subcomposing layout, which is
     // noticeably costly the first time it is composed) is needed to know the segment width.
     Box(
@@ -431,7 +627,10 @@ private fun TimerModeSelector(mode: TimerMode, onModeChange: (TimerMode) -> Unit
                 )
                 Box(
                     Modifier.weight(1f).fillMaxHeight().clip(CircleShape)
-                        .clickable { onModeChange(option) },
+                        .clickable {
+                            if (!selected) haptics.select()
+                            onModeChange(option)
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
@@ -451,6 +650,7 @@ private fun TimerModeSelector(mode: TimerMode, onModeChange: (TimerMode) -> Unit
 @Composable
 private fun DurationPicker(value: String, enabled: Boolean, onValueChange: (String) -> Unit) {
     val colors = MaterialTheme.colorScheme
+    val haptics = rememberHaptics()
     val line = Color.White.copy(alpha = 0.12f)
     Column(Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.4f)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -460,7 +660,10 @@ private fun DurationPicker(value: String, enabled: Boolean, onValueChange: (Stri
                     Modifier.weight(1f).height(40.dp).clip(CircleShape)
                         .background(if (selected) colors.primary else Color.Transparent)
                         .border(1.dp, if (selected) colors.primary else line, CircleShape)
-                        .clickable(enabled = enabled) { onValueChange(minutes.toString()) },
+                        .clickable(enabled = enabled) {
+                            if (!selected) haptics.select()
+                            onValueChange(minutes.toString())
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
@@ -511,29 +714,26 @@ private fun TimerControls(
     onReset: () -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
-    val haptics = LocalHapticFeedback.current
+    val resetSource = rememberPressSource()
+    val startSource = rememberPressSource()
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(28.dp)
     ) {
         Box(
-            Modifier.size(64.dp).alpha(if (canReset) 1f else 0.35f).clip(CircleShape)
+            Modifier.pressScale(resetSource).size(64.dp).alpha(if (canReset) 1f else 0.35f).clip(CircleShape)
                 .border(1.dp, Color.White.copy(alpha = 0.14f), CircleShape)
-                .clickable(enabled = canReset) {
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onReset()
-                },
+                .hapticClickable(resetSource, enabled = canReset, haptic = { heavy() }) { onReset() },
             contentAlignment = Alignment.Center
         ) {
             Text("Reset", color = colors.onSurfaceVariant, style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium))
         }
         Box(
-            Modifier.size(88.dp).alpha(if (startEnabled) 1f else 0.35f).clip(CircleShape)
+            Modifier.pressScale(startSource, 0.9f).size(88.dp).alpha(if (startEnabled) 1f else 0.35f).clip(CircleShape)
                 .background(colors.primary)
-                .clickable(enabled = startEnabled) {
-                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    onStartPause()
-                },
+                .hapticClickable(startSource, enabled = startEnabled, haptic = {
+                    if (isRunning) click() else confirm()
+                }) { onStartPause() },
             contentAlignment = Alignment.Center
         ) {
             Crossfade(isRunning, animationSpec = tween(160), label = "play-pause") { running ->
