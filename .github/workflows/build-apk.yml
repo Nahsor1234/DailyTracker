@@ -107,12 +107,12 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
-      - name: Publish GitHub prerelease
+      - name: Publish stable GitHub Release
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: debug-build-${{ github.run_number }}
-          name: DailyTracker Debug Build #${{ github.run_number }}
-          prerelease: true
+          tag_name: stable-build-${{ github.run_number }}
+          name: DailyTracker Stable Build #${{ github.run_number }}
+          prerelease: false
           generate_release_notes: true
           files: app/build/outputs/apk/debug/app-debug.apk
