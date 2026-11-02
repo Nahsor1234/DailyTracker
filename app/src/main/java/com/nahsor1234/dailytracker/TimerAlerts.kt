@@ -75,19 +75,32 @@ internal object TimerAlerts {
     private const val CHANNEL_PREFIX = "dailytracker_timer_"
     private val VIBRATION_PATTERN = longArrayOf(0, 600, 300, 600, 300, 900)
 
+    fun canScheduleExactAlarms(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        return context.applicationContext
+            .getSystemService(AlarmManager::class.java)
+            .canScheduleExactAlarms()
+    }
+
     /** [deadlineElapsedRealtime] uses the same clock as the countdown itself. */
-    fun schedule(context: Context, deadlineElapsedRealtime: Long) {
+    fun schedule(context: Context, deadlineElapsedRealtime: Long): Boolean {
         val app = context.applicationContext
         ensureChannel(app, TimerAlertSettings(app))
         val manager = app.getSystemService(AlarmManager::class.java)
-        val pending = alarmIntent(app)
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || manager.canScheduleExactAlarms()) {
-            manager.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, deadlineElapsedRealtime, pending)
-        } else {
-            // No exact-alarm access: an alarm-clock alarm is still exact and needs no permission.
-            val wallClock = System.currentTimeMillis() +
-                (deadlineElapsedRealtime - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
-            manager.setAlarmClock(AlarmManager.AlarmClockInfo(wallClock, openAppIntent(app)), pending)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !manager.canScheduleExactAlarms()) {
+            return false
+        }
+
+        return try {
+            manager.setExactAndAllowWhileIdle(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                deadlineElapsedRealtime,
+                alarmIntent(app)
+            )
+            true
+        } catch (_: SecurityException) {
+            // Permission can be revoked between the check and the scheduling call.
+            false
         }
     }
 
