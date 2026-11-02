@@ -75,7 +75,25 @@ import kotlin.math.sin
 private enum class TimerMode { STOPWATCH, COUNTDOWN }
 
 private const val DEFAULT_COUNTDOWN_MINUTES = 25L
-private const val MAX_COUNTDOWN_MINUTES = 599L
+private const val MAX_COUNTDOWN_MINUTES = 999L
+
+private class TimerStateStore(context: android.content.Context) {
+    private val prefs = context.applicationContext.getSharedPreferences("timer_state", android.content.Context.MODE_PRIVATE)
+    fun long(key: String, fallback: Long = 0L) = prefs.getLong(key, fallback)
+    fun bool(key: String, fallback: Boolean = false) = prefs.getBoolean(key, fallback)
+    fun string(key: String, fallback: String) = prefs.getString(key, fallback) ?: fallback
+    fun save(
+        mode: String, watchBase: Long, watchStarted: Long, watchRunning: Boolean,
+        minutes: String, remaining: Long, deadline: Long, countdownRunning: Boolean, finished: Boolean
+    ) {
+        prefs.edit()
+            .putString("mode", mode).putLong("watch_base", watchBase)
+            .putLong("watch_started", watchStarted).putBoolean("watch_running", watchRunning)
+            .putString("minutes", minutes).putLong("remaining", remaining)
+            .putLong("deadline", deadline).putBoolean("countdown_running", countdownRunning)
+            .putBoolean("finished", finished).apply()
+    }
+}
 private val DurationPresets = listOf(5, 15, 25, 45, 60)
 private val ModeSegmentWidth = 120.dp // (248dp pill - 2 * 4dp padding) / 2 segments
 
@@ -241,20 +259,21 @@ internal fun TimerScreenWarmUp(enabled: Boolean, modifier: Modifier = Modifier) 
 
 @Composable
 internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) {
-    var mode by rememberSaveable { mutableStateOf(TimerMode.STOPWATCH) }
+    val context = LocalContext.current
+    val timerStore = remember { TimerStateStore(context) }
+    var mode by remember { mutableStateOf(runCatching { TimerMode.valueOf(timerStore.string("mode", TimerMode.STOPWATCH.name)) }.getOrDefault(TimerMode.STOPWATCH)) }
     var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
-    var watchElapsedBase by rememberSaveable { mutableLongStateOf(0L) }
-    var watchStartedAt by rememberSaveable { mutableLongStateOf(0L) }
-    var watchRunning by rememberSaveable { mutableStateOf(false) }
-    var minutesText by rememberSaveable { mutableStateOf(DEFAULT_COUNTDOWN_MINUTES.toString()) }
-    var remainingBase by rememberSaveable { mutableLongStateOf(DEFAULT_COUNTDOWN_MINUTES * 60_000L) }
-    var countdownDeadline by rememberSaveable { mutableLongStateOf(0L) }
-    var countdownRunning by rememberSaveable { mutableStateOf(false) }
-    var finished by rememberSaveable { mutableStateOf(false) }
+    var watchElapsedBase by remember { mutableLongStateOf(timerStore.long("watch_base")) }
+    var watchStartedAt by remember { mutableLongStateOf(timerStore.long("watch_started")) }
+    var watchRunning by remember { mutableStateOf(timerStore.bool("watch_running")) }
+    var minutesText by remember { mutableStateOf(timerStore.string("minutes", DEFAULT_COUNTDOWN_MINUTES.toString())) }
+    var remainingBase by remember { mutableLongStateOf(timerStore.long("remaining", DEFAULT_COUNTDOWN_MINUTES * 60_000L)) }
+    var countdownDeadline by remember { mutableLongStateOf(timerStore.long("deadline")) }
+    var countdownRunning by remember { mutableStateOf(timerStore.bool("countdown_running")) }
+    var finished by remember { mutableStateOf(timerStore.bool("finished")) }
     var showExactAlarmPermissionDialog by rememberSaveable { mutableStateOf(false) }
     var startCountdownAfterPermission by rememberSaveable { mutableStateOf(false) }
 
-    val context = LocalContext.current
     val haptics = rememberHaptics()
     val alertSettings = remember { TimerAlertSettings(context) }
     var soundOn by remember { mutableStateOf(alertSettings.soundEnabled) }
@@ -296,6 +315,13 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
             )
         }
         now = SystemClock.elapsedRealtime()
+    }
+
+    LaunchedEffect(mode, watchElapsedBase, watchStartedAt, watchRunning, minutesText, remainingBase, countdownDeadline, countdownRunning, finished) {
+        timerStore.save(
+            mode.name, watchElapsedBase, watchStartedAt, watchRunning,
+            minutesText, remainingBase, countdownDeadline, countdownRunning, finished
+        )
     }
 
     val watchElapsed = watchElapsedBase +
