@@ -181,8 +181,9 @@ private fun DotField(
             val level = dotLevel(dot, progress, dissolving)
             val lit = if (finished) pulse else level
             val front = if (running && !finished) 1f - abs(2f * level - 1f) else 0f
-            val tint = lerp(colors.primary, Color.White, front * 0.9f)
-                .copy(alpha = (0.07f + 0.88f * lit).coerceIn(0f, 1f))
+            // lerp() converts both colours through Oklab; only dots on the moving front need it.
+            val base = if (front > 0f) lerp(colors.primary, Color.White, front * 0.9f) else colors.primary
+            val tint = base.copy(alpha = (0.07f + 0.88f * lit).coerceIn(0f, 1f))
             drawCircle(
                 color = tint,
                 radius = dotRadius * (0.55f + 0.45f * lit),
@@ -239,7 +240,7 @@ internal fun TimerScreenWarmUp(enabled: Boolean, modifier: Modifier = Modifier) 
 }
 
 @Composable
-internal fun TimerScreen(modifier: Modifier = Modifier) {
+internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) {
     var mode by rememberSaveable { mutableStateOf(TimerMode.STOPWATCH) }
     var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     var watchElapsedBase by rememberSaveable { mutableLongStateOf(0L) }
@@ -280,10 +281,19 @@ internal fun TimerScreen(modifier: Modifier = Modifier) {
         ActivityResultContracts.RequestPermission()
     ) { granted -> notificationsBlocked = !granted }
 
-    LaunchedEffect(watchRunning, countdownRunning) {
+    // The screen stays composed while Progress is shown. All readings are derived from the
+    // elapsed-realtime clock, so while hidden there is nothing to redraw at 20 Hz: a running
+    // countdown only needs to wake at its deadline (to finish and alert), a stopwatch not at all.
+    LaunchedEffect(watchRunning, countdownRunning, active) {
         while (watchRunning || countdownRunning) {
             now = SystemClock.elapsedRealtime()
-            delay(50L)
+            delay(
+                when {
+                    active -> 50L
+                    countdownRunning -> (countdownDeadline - now).coerceIn(1L, 60_000L)
+                    else -> 60_000L
+                }
+            )
         }
         now = SystemClock.elapsedRealtime()
     }
