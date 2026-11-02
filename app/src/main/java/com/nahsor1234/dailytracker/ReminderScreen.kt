@@ -163,6 +163,8 @@ internal fun ReminderScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(4.dp))
             Text("Keep your day on track, at the right time.",
                 color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(18.dp))
+            AlarmReliabilityCard()
             Spacer(Modifier.height(22.dp))
 
             BoxWithConstraints(
