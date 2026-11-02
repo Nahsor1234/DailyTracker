@@ -15,6 +15,11 @@
         android:theme="@style/Theme.DailyTracker">
 
         <receiver
+            android:name=".ReminderDismissReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+        <receiver
             android:name=".ReminderAlarmReceiver"
             android:enabled="true"
             android:exported="false" />
