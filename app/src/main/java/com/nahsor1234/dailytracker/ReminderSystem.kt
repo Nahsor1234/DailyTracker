@@ -1,21 +1,13 @@
 package com.nahsor1234.dailytracker
 
 import android.app.AlarmManager
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.media.AudioAttributes
-import android.media.RingtoneManager
-import android.os.Build
-import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.LocalDate
-import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 
@@ -82,7 +74,8 @@ internal class ReminderStore(context: Context) {
                 }
             )
         }
-        preferences.edit().putString(KEY_REMINDERS, array.toString()).apply()
+        // commit(), not apply(): the alarm receiver saves and the process may be killed straight after.
+        preferences.edit().putString(KEY_REMINDERS, array.toString()).commit()
     }
 
     fun upsert(reminder: TrackerReminder) {
@@ -103,32 +96,28 @@ internal object ReminderScheduler {
     const val ACTION_FIRE = "com.nahsor1234.dailytracker.action.FIRE_REMINDER"
     const val EXTRA_REMINDER_ID = "reminder_id"
 
-    fun canScheduleExact(context: Context): Boolean {
-        val manager = context.getSystemService(AlarmManager::class.java)
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.S || manager.canScheduleExactAlarms()
-    }
-
     fun schedule(context: Context, reminder: TrackerReminder) {
-        cancel(context, reminder.id)
-        if (!reminder.enabled) return
         val manager = context.getSystemService(AlarmManager::class.java)
-        if (reminder.kind == ReminderKind.ALARM) ReminderNotificationChannels.ensureAlarmChannel(context, reminder.ringtoneUri)
+        manager.cancel(pendingIntent(context, reminder.id))
+        if (!reminder.enabled) return
         val triggerAt = nextTriggerMillis(reminder)
         if (triggerAt == null) {
             ReminderStore(context).upsert(reminder.copy(enabled = false))
             return
         }
-        val pendingIntent = pendingIntent(context, reminder.id)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && manager.canScheduleExactAlarms()) {
-            manager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
-        } else {
-            manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
-        }
+        ExactAlarms.set(
+            context,
+            triggerAt,
+            pendingIntent(context, reminder.id),
+            asAlarmClock = reminder.kind == ReminderKind.ALARM
+        )
     }
 
+    /** Removes the reminder's alarm and any snooze it has pending. */
     fun cancel(context: Context, id: Long) {
         val manager = context.getSystemService(AlarmManager::class.java)
         manager.cancel(pendingIntent(context, id))
+        AlarmRinging.cancelSnooze(context, RingRequest.SOURCE_REMINDER, id)
     }
 
     fun rescheduleAll(context: Context) {
@@ -166,81 +155,6 @@ internal object ReminderScheduler {
     }
 }
 
-internal object ReminderNotificationChannels {
-    const val NOTIFICATIONS = "dailytracker_reminders"
-    private const val ALARM_CHANNEL_PREFIX = "dailytracker_alarm_"
-
-    fun alarmChannelId(ringtoneUri: String?): String {
-        val sound = ringtoneUri ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)?.toString().orEmpty()
-        return ALARM_CHANNEL_PREFIX + sound.hashCode().toUInt().toString(16)
-    }
-
-    fun create(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val notificationChannel = NotificationChannel(
-            NOTIFICATIONS, "Reminders", NotificationManager.IMPORTANCE_DEFAULT
-        ).apply { description = "Scheduled study and daily reminders" }
-        context.getSystemService(NotificationManager::class.java).createNotificationChannel(notificationChannel)
-        ensureAlarmChannel(context, null)
-    }
-
-    fun ensureAlarmChannel(context: Context, ringtoneUri: String?) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val soundUri = ringtoneUri?.let(Uri::parse)
-            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-        val channel = NotificationChannel(
-            alarmChannelId(ringtoneUri), "DailyTracker alarm", NotificationManager.IMPORTANCE_HIGH
-        ).apply {
-            description = "User-scheduled DailyTracker alarms"
-            enableVibration(true)
-            setSound(soundUri, AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).build())
-        }
-        context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-    }
-
-    fun show(context: Context, reminder: TrackerReminder) {
-        create(context)
-        if (!context.getSystemService(NotificationManager::class.java).areNotificationsEnabled()) return
-        if (Build.VERSION.SDK_INT >= 33 &&
-            context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
-        ) return
-
-        val openApp = PendingIntent.getActivity(
-            context,
-            reminder.id.hashCode(),
-            Intent(context, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val channel = if (reminder.kind == ReminderKind.ALARM) alarmChannelId(reminder.ringtoneUri) else NOTIFICATIONS
-        val dismiss = PendingIntent.getBroadcast(
-            context,
-            reminder.id.hashCode(),
-            Intent(context, ReminderDismissReceiver::class.java)
-                .setAction(ReminderDismissReceiver.ACTION_DISMISS)
-                .putExtra(ReminderDismissReceiver.EXTRA_NOTIFICATION_ID, reminder.id.hashCode()),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val notification = Notification.Builder(context, channel)
-            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-            .setContentTitle(reminder.title)
-            .setContentText(if (reminder.kind == ReminderKind.ALARM) "Scheduled alarm" else "Scheduled reminder")
-            .setStyle(Notification.BigTextStyle().bigText(
-                if (reminder.kind == ReminderKind.ALARM) "Your scheduled alarm is due." else "Your scheduled reminder is due."
-            ))
-            .setWhen(System.currentTimeMillis())
-            .setShowWhen(true)
-            .addAction(Notification.Action.Builder(null, "Dismiss", dismiss).build())
-            .setCategory(if (reminder.kind == ReminderKind.ALARM) Notification.CATEGORY_ALARM else Notification.CATEGORY_REMINDER)
-            .setPriority(if (reminder.kind == ReminderKind.ALARM) Notification.PRIORITY_HIGH else Notification.PRIORITY_DEFAULT)
-            .setAutoCancel(true)
-            .setContentIntent(openApp)
-            .build()
-        context.getSystemService(NotificationManager::class.java).notify(reminder.id.hashCode(), notification)
-    }
-}
-
 internal class ReminderAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ReminderScheduler.ACTION_FIRE) return
@@ -250,36 +164,29 @@ internal class ReminderAlarmReceiver : BroadcastReceiver() {
         val reminder = store.find(id) ?: return
         if (!reminder.enabled) return
 
-        ReminderNotificationChannels.show(context, reminder)
+        // Arm the next occurrence before showing anything, so a daily reminder keeps coming even
+        // if showing this one fails.
         if (reminder.daily) {
             ReminderScheduler.schedule(context, reminder)
         } else {
             store.upsert(reminder.copy(enabled = false))
         }
+        AlarmRinging.deliver(context, RingRequest.forReminder(reminder))
     }
 }
 
+/** Re-arms every alarm after anything that makes the system forget or shift them. */
 internal class ReminderRescheduleReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_TIME_CHANGED,
             Intent.ACTION_TIMEZONE_CHANGED,
-            Intent.ACTION_MY_PACKAGE_REPLACED -> ReminderScheduler.rescheduleAll(context)
+            Intent.ACTION_MY_PACKAGE_REPLACED,
+            "android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" -> {
+                ReminderScheduler.rescheduleAll(context)
+                TimerAlerts.restore(context)
+            }
         }
-    }
-}
-
-
-internal class ReminderDismissReceiver : BroadcastReceiver() {
-    override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != ACTION_DISMISS) return
-        val id = intent.getIntExtra(EXTRA_NOTIFICATION_ID, -1)
-        if (id != -1) context.getSystemService(NotificationManager::class.java).cancel(id)
-    }
-
-    companion object {
-        const val ACTION_DISMISS = "com.nahsor1234.dailytracker.action.DISMISS_REMINDER"
-        const val EXTRA_NOTIFICATION_ID = "notification_id"
     }
 }

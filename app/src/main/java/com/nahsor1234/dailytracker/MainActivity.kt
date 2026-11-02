@@ -88,6 +88,8 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         TimerAlertState.appInForeground = true
+        // Opening the app silences whatever is ringing; the notification's own buttons do the same.
+        AlarmRinging.stop(this)
         TimerAlerts.dismissNotification(this)
     }
 
@@ -115,7 +117,7 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
         }
-        ReminderNotificationChannels.create(this)
+        AlarmNotifications.ensureChannels(this, cleanup = true)
         // Re-arming alarms reads stored reminders from disk: keep that off the first frame.
         val appContext = applicationContext
         Thread({ ReminderScheduler.rescheduleAll(appContext) }, "dailytracker-reminders").start()
