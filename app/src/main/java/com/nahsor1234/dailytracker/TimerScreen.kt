@@ -10,6 +10,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
@@ -65,6 +67,7 @@ import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
@@ -94,91 +97,155 @@ private val DurationPresets = listOf(5, 15, 25, 45, 60)
 private val ModeSegmentWidth = 120.dp // (248dp pill - 2 * 4dp padding) / 2 segments
 
 // ---------------------------------------------------------------------------------------------
-// Dot field: concentric rings of dots that alternate between disappearing (outside-in) and
-// reappearing (inside-out) in consecutive one-minute phases. The countdown starts with a
-// disappearing phase, the stopwatch with an appearing one. The phase is a pure function of the
-// elapsed time, so nothing is simulated and no separate animation clock is involved.
+// Dot field. Three layers, all drawn as a pure function of the elapsed time (nothing is
+// simulated and no separate animation clock is involved):
+//
+//  - Inner field (rings 1..10): the dots shrink away outside-in during one minute and pop back
+//    inside-out the next. Leaving dots drift slightly outward and flash at the moving edge; gone
+//    dots stay as tiny pinpoints so the shape of the field is always visible.
+//  - Seconds dot (ring 11): one bright dot with a short tail that circles once per minute.
+//  - Outer ring (ring 12): 75 dots. For a countdown it empties clockwise over the whole session;
+//    for the stopwatch it fills once per minute.
+//
+// In the last minute of a countdown the colour warms from green to amber, in the last ten
+// seconds everything pulses, and at zero a shockwave sweeps outward and re-lights the field.
 // ---------------------------------------------------------------------------------------------
 
-private const val FIELD_RINGS = 12
-private const val FRONT_WIDTH = 0.05f
+private const val INNER_RINGS = 10
+private const val SECONDS_RING = 11
+private const val OUTER_RING = 12
+private const val OUTER_DOTS = 75
+private const val FRONT_WIDTH = 0.14f
+private const val SEED_JITTER = 0.10f
+private const val DRIFT_CELLS = 0.6f
+private const val WAVE_WIDTH = 0.12f
+private const val WAVE_END = 1.3f
 private const val PHASE_MILLIS = 60_000L
+private const val URGENCY_MILLIS = 60_000L
+private const val FINAL_BEAT_MILLIS = 10_000L
 
-private class Dot(val x: Float, val y: Float, val rho: Float, val seed: Float)
+private val AmberTone = Color(0xFFE0A84A)
+private val FrontGreen = Color(0xFFCFEBD6)
+private val FrontAmber = Color(0xFFFFE3A8)
+
+/** [x]/[y] are in cell units from the centre; [ux]/[uy] is the outward direction. */
+private class Dot(
+    val x: Float,
+    val y: Float,
+    val ux: Float,
+    val uy: Float,
+    val rho: Float,
+    val seed: Float
+)
 
 /** Built once per process and shared by every dot field. */
-private val DotLayout: List<Dot> by lazy { buildDotField(FIELD_RINGS) }
+private val DotLayout: List<Dot> by lazy { buildDotField(INNER_RINGS) }
+private val OuterCos: FloatArray by lazy {
+    FloatArray(OUTER_DOTS) { cos(-PI / 2.0 + 2.0 * PI * it / OUTER_DOTS).toFloat() }
+}
+private val OuterSin: FloatArray by lazy {
+    FloatArray(OUTER_DOTS) { sin(-PI / 2.0 + 2.0 * PI * it / OUTER_DOTS).toFloat() }
+}
 
 private fun buildDotField(rings: Int): List<Dot> = buildList {
-    add(Dot(0f, 0f, 0f, 0.5f))
+    add(Dot(0f, 0f, 0f, 0f, 0f, 0.5f))
     for (k in 1..rings) {
         val count = (2.0 * PI * k).roundToInt()
         val phase = if (k % 2 == 0) 0.0 else PI / count // half-step offset gives a hex-like weave
         for (i in 0 until count) {
             val angle = 2.0 * PI * i / count + phase - PI / 2.0
             val seed = (((k * 73856093) xor (i * 19349663)) and 0xFFFF) / 65535f
-            add(
-                Dot(
-                    x = (cos(angle) * k / rings).toFloat(),
-                    y = (sin(angle) * k / rings).toFloat(),
-                    rho = k.toFloat() / rings,
-                    seed = seed
-                )
-            )
+            val ux = cos(angle).toFloat()
+            val uy = sin(angle).toFloat()
+            add(Dot(ux * k, uy * k, ux, uy, k.toFloat() / rings, seed))
         }
     }
 }
 
-/** 0 = fully gone / unlit, 1 = fully present / lit. */
-private fun dotLevel(dot: Dot, progress: Float, dissolving: Boolean): Float =
-    if (dissolving) {
-        val threshold = (1f - dot.rho) * 0.90f + dot.seed * 0.04f
-        ((threshold - progress) / FRONT_WIDTH + 1f).coerceIn(0f, 1f)
-    } else {
-        val threshold = dot.rho * 0.90f + dot.seed * 0.04f
-        ((progress - threshold) / FRONT_WIDTH).coerceIn(0f, 1f)
-    }
+/**
+ * 0 = fully present, 1 = fully gone. Each dot has its own short transition window, placed by its
+ * ring (outside-in or inside-out) plus a little per-dot jitter. Both directions end a phase in
+ * exactly the state the opposite direction starts from (every dot gone, or every dot present),
+ * so consecutive phases join without a jump.
+ */
+private fun dotLeave(dot: Dot, progress: Float, dissolving: Boolean): Float {
+    val span = 1f - FRONT_WIDTH - SEED_JITTER
+    val threshold = (if (dissolving) 1f - dot.rho else dot.rho) * span + dot.seed * SEED_JITTER
+    val u = ((progress - threshold) / FRONT_WIDTH).coerceIn(0f, 1f)
+    return if (dissolving) u else 1f - u
+}
+
+private fun easeOutBack(x: Float): Float {
+    val c1 = 1.70158f
+    val c3 = c1 + 1f
+    val t = x - 1f
+    return 1f + c3 * t * t * t + c1 * t * t
+}
 
 /** Position (0..1) inside the current one-minute phase. */
 private fun phaseProgress(elapsedMillis: Long): Float =
     (elapsedMillis.coerceAtLeast(0L) % PHASE_MILLIS).toFloat() / PHASE_MILLIS
 
-/**
- * Whether the current one-minute phase makes dots disappear. Phases alternate every minute and
- * [dissolveFirst] sets the direction of the first one. Both curves in [dotLevel] end a phase in
- * exactly the state the opposite curve starts from (every dot gone, or every dot present), so
- * consecutive phases join without a jump.
- */
+/** Whether the current one-minute phase makes dots disappear; [dissolveFirst] sets the first one. */
 private fun phaseDissolves(elapsedMillis: Long, dissolveFirst: Boolean): Boolean {
     val inEvenPhase = (elapsedMillis.coerceAtLeast(0L) / PHASE_MILLIS) % 2L == 0L
     return inEvenPhase == dissolveFirst
 }
 
+/**
+ * [totalMillis] is the length of a countdown session (drives the outer ring and the colour
+ * warm-up); pass null for the stopwatch.
+ */
 @Composable
 private fun DotField(
     elapsedMillis: Long,
     dissolveFirst: Boolean,
     running: Boolean,
     finished: Boolean,
+    totalMillis: Long?,
     modifier: Modifier = Modifier
 ) {
     val colors = MaterialTheme.colorScheme
     val dots = DotLayout
     val progress = phaseProgress(elapsedMillis)
     val dissolving = phaseDissolves(elapsedMillis, dissolveFirst)
-    val pulse by rememberInfiniteTransition(label = "finish-pulse").animateFloat(
-        initialValue = 0.05f,
-        targetValue = 0.55f,
+    val wave = remember { Animatable(0f) }
+    LaunchedEffect(finished) {
+        wave.snapTo(0f)
+        if (finished) wave.animateTo(WAVE_END, tween(1400, easing = LinearEasing))
+    }
+    val breath by rememberInfiniteTransition(label = "finish-breath").animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
         animationSpec = infiniteRepeatable(tween(1500), RepeatMode.Reverse),
-        label = "finish-pulse-value"
+        label = "finish-breath-value"
     )
+
+    val hasTotal = totalMillis != null && totalMillis > 0L
+    val remainingMillis = if (hasTotal) totalMillis!! - elapsedMillis else Long.MAX_VALUE
+    val urgency = if (hasTotal) ((URGENCY_MILLIS - remainingMillis) / URGENCY_MILLIS.toFloat()).coerceIn(0f, 1f) else 0f
+    val ringConsumed = if (hasTotal) {
+        (elapsedMillis.toFloat() / totalMillis!!).coerceIn(0f, 1f) * OUTER_DOTS
+    } else {
+        phaseProgress(elapsedMillis) * OUTER_DOTS
+    }
+    val secondsAngle = -PI.toFloat() / 2f + 2f * PI.toFloat() * phaseProgress(elapsedMillis)
+    val finalBeat = hasTotal && !finished && remainingMillis in 1..FINAL_BEAT_MILLIS
 
     Canvas(modifier) {
         val center = Offset(size.width / 2f, size.height / 2f)
         val outerRadius = size.minDimension / 2f
-        val cell = outerRadius / (FIELD_RINGS + 0.7f)
-        val fieldRadius = cell * FIELD_RINGS
+        val cell = outerRadius / (OUTER_RING + 0.7f)
         val dotRadius = cell * 0.27f
+        val live = running && !finished
+
+        val base = if (urgency > 0f) lerp(colors.primary, AmberTone, urgency) else colors.primary
+        val front = if (urgency > 0f) lerp(FrontGreen, FrontAmber, urgency) else FrontGreen
+        val beat = if (finalBeat) 0.78f + 0.22f * sin(elapsedMillis / 1000f * 4f * PI.toFloat()) else 1f
+        val solid = base.copy(alpha = beat)
+        val ghost = base.copy(alpha = 0.22f)
+        val w = wave.value
+        val breathe = if (finished && w >= WAVE_END) 0.92f + 0.08f * breath else 1f
 
         // Soft ambient glow behind the field gives depth without a hard container.
         drawCircle(
@@ -191,21 +258,83 @@ private fun DotField(
             center = center
         )
 
+        // Inner field.
         for (dot in dots) {
-            val level = dotLevel(dot, progress, dissolving)
-            val lit = if (finished) pulse else level
-            val front = if (running && !finished) 1f - abs(2f * level - 1f) else 0f
-            // lerp() converts both colours through Oklab; only dots on the moving front need it.
-            val base = if (front > 0f) lerp(colors.primary, Color.White, front * 0.9f) else colors.primary
-            val tint = base.copy(alpha = (0.07f + 0.88f * lit).coerceIn(0f, 1f))
+            val position = Offset(center.x + dot.x * cell, center.y + dot.y * cell)
+            if (finished) {
+                val lit = ((w - dot.rho) / WAVE_WIDTH).coerceIn(0f, 1f)
+                if (lit <= 0f) {
+                    drawCircle(ghost, cell * 0.07f, position)
+                    continue
+                }
+                val flash = (1f - abs(w - dot.rho) / 0.1f).coerceIn(0f, 1f)
+                val tint = if (flash > 0f) lerp(base, front, flash * 0.85f) else base
+                drawCircle(tint, dotRadius * easeOutBack(lit) * breathe, position)
+                continue
+            }
+            val leave = dotLeave(dot, progress, dissolving)
+            if (leave >= 1f) {
+                drawCircle(ghost, cell * 0.07f, position)
+                continue
+            }
+            if (leave <= 0f) {
+                drawCircle(solid, dotRadius, position)
+                continue
+            }
+            // In transition: shrink (or pop back in) while drifting outward.
+            drawCircle(ghost.copy(alpha = 0.22f * minOf(1f, leave * 3f)), cell * 0.07f, position)
+            val visible = 1f - leave
+            val scale = if (dissolving) 1f - leave.pow(2.2f) else easeOutBack(visible)
+            val drift = (if (dissolving) leave.pow(1.6f) else (1f - visible) * (1f - visible)) * DRIFT_CELLS * cell
+            val tint = if (live) lerp(base, front, sin(PI.toFloat() * leave) * 0.85f) else base
             drawCircle(
                 color = tint,
-                radius = dotRadius * (0.55f + 0.45f * lit),
-                center = Offset(center.x + dot.x * fieldRadius, center.y + dot.y * fieldRadius)
+                radius = dotRadius * maxOf(scale, 0f),
+                center = Offset(position.x + dot.ux * drift, position.y + dot.uy * drift)
             )
+        }
+
+        // Outer ring: whole-session progress (countdown) or this minute's seconds (stopwatch).
+        val edge = consumedEdge(ringConsumed)
+        for (j in 0 until OUTER_DOTS) {
+            val lit: Float
+            val flash: Float
+            if (finished) {
+                lit = ((w - 1.1f) / WAVE_WIDTH).coerceIn(0f, 1f)
+                flash = (1f - abs(w - 1.1f) / 0.1f).coerceIn(0f, 1f)
+            } else {
+                lit = if (hasTotal) (j + 1f - ringConsumed).coerceIn(0f, 1f) else (ringConsumed - j).coerceIn(0f, 1f)
+                flash = if (live && j == edge) 1f else 0f
+            }
+            val tint = if (flash > 0f) lerp(base, front, 0.9f * flash) else base
+            drawCircle(
+                color = tint.copy(alpha = ((0.07f + 0.88f * lit) * beat).coerceIn(0f, 1f)),
+                radius = cell * 0.3f * (0.6f + 0.4f * lit) * breathe,
+                center = Offset(
+                    center.x + OuterCos[j] * OUTER_RING * cell,
+                    center.y + OuterSin[j] * OUTER_RING * cell
+                )
+            )
+        }
+
+        // Seconds dot with a short tail.
+        if (!finished) {
+            for (q in 5 downTo 0) {
+                val angle = secondsAngle - q * 0.1f
+                drawCircle(
+                    color = front.copy(alpha = if (q == 0) 1f else 0.5f / q),
+                    radius = cell * (if (q == 0) 0.42f else 0.3f - q * 0.03f),
+                    center = Offset(
+                        center.x + cos(angle) * SECONDS_RING * cell,
+                        center.y + sin(angle) * SECONDS_RING * cell
+                    )
+                )
+            }
         }
     }
 }
+
+private fun consumedEdge(consumed: Float): Int = consumed.toInt().coerceIn(0, OUTER_DOTS - 1)
 
 // ---------------------------------------------------------------------------------------------
 // Screen
@@ -397,6 +526,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
                     dissolveFirst = false,
                     running = watchRunning,
                     finished = false,
+                    totalMillis = null,
                     modifier = Modifier.size(296.dp)
                 )
                 val (main, tenths) = splitStopwatch(watchElapsed)
@@ -432,6 +562,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
                     dissolveFirst = true,
                     running = countdownRunning,
                     finished = finished,
+                    totalMillis = configuredMillis,
                     modifier = Modifier.size(296.dp)
                 )
                 TimeReadout(
