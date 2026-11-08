@@ -14,7 +14,8 @@ permissions:
 jobs:
   build:
     name: Build and verify APK
-    runs-on: ubuntu-latest
+    # Pin the runner image because the SDK bootstrap intentionally reuses its preinstalled tools.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -48,7 +49,8 @@ jobs:
           fi
 
           if [[ -s "$SDK_ROOT/platforms/android-35/android.jar" \
-             && -x "$SDK_ROOT/build-tools/35.0.0/aapt" ]]; then
+             && -x "$SDK_ROOT/build-tools/35.0.0/aapt" \\
+             && -x "$SDK_ROOT/build-tools/35.0.0/apksigner" ]]; then
             echo "Android API 35 and Build Tools 35.0.0 are already installed; skipping sdkmanager."
           else
             sdkmanager "platforms;android-35" "build-tools;35.0.0"
