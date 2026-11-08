@@ -47,12 +47,11 @@ Application ID: `com.nahsor1234.dailytracker`
 
 ## Build
 
-The GitHub Actions workflow builds the debug APK, verifies the permanent signing identity, uploads the APK artifact, and publishes a GitHub prerelease for pushes to `main`.
+GitHub Actions builds the debug APK, verifies the permanent signing identity, uploads the APK artifact, and publishes a stable GitHub Release for pushes to `main`.
 
-For a local build, generate the Gradle wrapper with Gradle 8.13 if it is not already present, then run:
+For a local build, run:
 
 ```bash
-gradle wrapper --gradle-version 8.13
 ./gradlew :app:assembleDebug
 ```
 
