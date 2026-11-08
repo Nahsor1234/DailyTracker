@@ -49,6 +49,8 @@ Application ID: `com.nahsor1234.dailytracker`
 
 GitHub Actions builds the debug APK, verifies the permanent signing identity, uploads the APK artifact, and publishes a stable GitHub Release for pushes to `main`.
 
+The CI workflow uses Ubuntu 24.04, JDK 17, and the committed Gradle 8.13 Wrapper with distribution checksum verification. It reuses the runner's Android API 35 and Build Tools 35.0.0 packages when present, and caches Gradle state. Same-repository pull requests can populate the cache; fork pull requests remain read-only. Release publishing runs separately with write permission limited to that job.
+
 For a local build, run:
 
 ```bash
