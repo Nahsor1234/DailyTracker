@@ -630,7 +630,6 @@ private fun AuthField(
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        modifier = if (contentType != null) Modifier.semantics { this.contentType = contentType } else Modifier,
         label = { Text(label) },
         singleLine = true,
         enabled = enabled,
@@ -662,7 +661,9 @@ private fun AuthField(
             focusedTextColor = scheme.onSurface,
             unfocusedTextColor = scheme.onSurface
         ),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth().then(
+            if (contentType != null) Modifier.semantics { this.contentType = contentType } else Modifier
+        )
     )
 }
 
