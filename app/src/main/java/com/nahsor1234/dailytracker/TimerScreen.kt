@@ -475,6 +475,12 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
         ActivityResultContracts.RequestPermission()
     ) { granted -> notificationsBlocked = !granted }
 
+    // Re-check every time the Timer screen is shown, so a blocked notification is flagged here
+    // before a countdown ever runs, not only once at the first start.
+    LaunchedEffect(active) {
+        if (active) notificationsBlocked = !TimerAlerts.notificationsAllowed(context)
+    }
+
     // "Keep screen on": only while the Timer screen is the one being shown, in Countdown mode and
     // with the option switched on. The flag is released as soon as any of those stops being true
     // (leaving the screen, switching to Stopwatch, switching the option off), so normal screen
@@ -521,14 +527,17 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
             remainingBase = 0L
             countdownRunning = false
             finished = true
-            // The screen handles the alert itself, so the system alarm is no longer needed.
-            TimerAlerts.cancel(context)
-            TimerAlerts.dismissNotification(context)
-            // Ring only if the countdown ended just now. If it ended while the app was away, the
-            // notification has already told the user.
-            if (overdue < 3_000L) {
-                haptics.confirm()
-                TimerAlarmPlayer.start(context, alertSettings)
+            // Only take over from the system alarm while the app is actually on screen. In the
+            // background the system alarm (ringing service + notification with a Stop button) is
+            // already handling it; cancelling it here is what used to leave the sound playing with
+            // no notification to stop it.
+            if (TimerAlertState.appInForeground) {
+                TimerAlerts.cancel(context)
+                TimerAlerts.dismissNotification(context)
+                if (overdue < 3_000L) {
+                    haptics.confirm()
+                    TimerAlarmPlayer.start(context, alertSettings)
+                }
             }
         }
     }
@@ -982,12 +991,17 @@ private fun TimerControls(
         horizontalArrangement = Arrangement.spacedBy(28.dp)
     ) {
         Box(
-            Modifier.pressScale(resetSource).size(64.dp).alpha(if (canReset) 1f else 0.35f).clip(CircleShape)
-                .border(1.dp, Color.White.copy(alpha = 0.14f), CircleShape)
+            Modifier.pressScale(resetSource).size(64.dp).alpha(if (canReset) 1f else 0.45f).clip(CircleShape)
+                .border(1.dp, Color.White.copy(alpha = 0.24f), CircleShape)
                 .hapticClickable(resetSource, enabled = canReset, haptic = { heavy() }) { onReset() },
             contentAlignment = Alignment.Center
         ) {
-            Text("Reset", color = colors.onSurfaceVariant, style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium))
+            Text(
+                "Reset",
+                // A little brighter than before (about 10% more contrast); size and weight unchanged.
+                color = androidx.compose.ui.graphics.lerp(colors.onSurfaceVariant, colors.onSurface, 0.35f),
+                style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            )
         }
         Box(
             Modifier.pressScale(startSource, 0.9f).size(88.dp).alpha(if (startEnabled) 1f else 0.35f).clip(CircleShape)

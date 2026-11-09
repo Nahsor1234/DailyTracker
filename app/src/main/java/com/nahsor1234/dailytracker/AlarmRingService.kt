@@ -13,6 +13,9 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.RingtoneManager
+import android.media.VolumeProvider
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -34,6 +37,7 @@ internal class AlarmRingService : Service() {
     private var player: MediaPlayer? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var audioFocus: AudioFocusRequest? = null
+    private var volumeSession: MediaSession? = null
     private val giveUp = Runnable { finish(missed = true) }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -116,6 +120,41 @@ internal class AlarmRingService : Service() {
             player = openPlayer(ring.ringtoneUri, attributes)
         }
         if (ring.vibrate) vibrate(attributes)
+        captureVolumeKeys()
+    }
+
+    /**
+     * While the alert rings, a pressed volume button stops it instead of changing the volume. This
+     * uses a media session with remote volume, which Android routes the hardware volume keys to even
+     * when the app is closed and the screen is off. It is released as soon as the alert ends.
+     * Some phones route the keys differently, so the notification's Stop button stays the main way.
+     */
+    private fun captureVolumeKeys() {
+        runCatching {
+            val session = MediaSession(this, "dailytracker-alert")
+            session.setPlaybackState(
+                PlaybackState.Builder()
+                    .setState(PlaybackState.STATE_PLAYING, 0L, 1f)
+                    .build()
+            )
+            session.setPlaybackToRemote(
+                object : VolumeProvider(VolumeProvider.VOLUME_CONTROL_RELATIVE, 100, 50) {
+                    override fun onAdjustVolume(direction: Int) {
+                        if (direction != 0) handler.post { finish(missed = false) }
+                    }
+                }
+            )
+            session.isActive = true
+            volumeSession = session
+        }
+    }
+
+    private fun releaseVolumeKeys() {
+        volumeSession?.let {
+            runCatching { it.isActive = false }
+            runCatching { it.release() }
+        }
+        volumeSession = null
     }
 
     /**
@@ -162,6 +201,7 @@ internal class AlarmRingService : Service() {
     }
 
     private fun stopPlayback() {
+        releaseVolumeKeys()
         player?.let {
             runCatching { it.stop() }
             runCatching { it.release() }

@@ -167,6 +167,21 @@ class MainActivity : ComponentActivity() {
         super.onStop()
     }
 
+    // While something is ringing, either volume button silences it (and is not also used to
+    // change the volume).
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        if ((keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP ||
+                keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN) &&
+            (TimerAlarmPlayer.ringing || AlarmRinging.current != null)
+        ) {
+            TimerAlarmPlayer.stop(this)
+            TimerAlerts.dismissNotification(this)
+            AlarmRinging.stop(this)
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
     /** A sign-in link is used once: forget it here so rotating the phone cannot replay it. */
     private fun consumeAuthLink() {
         authCallbackUri = null
@@ -242,6 +257,7 @@ private fun DailyTrackerApp(
     var lastSyncedAt by rememberSaveable { mutableLongStateOf(0L) }
     var clockNow by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var cloudDataRevision by remember { mutableIntStateOf(0) }
+    var showSyncToast by remember { mutableStateOf(false) }
     var pendingLink by remember { mutableStateOf<DailyTrackerCloud.PendingAuthLink?>(null) }
     var showSetup by rememberSaveable { mutableStateOf(!SetupPrefs.isDone(appContext)) }
     var passwordRecoveryPending by rememberSaveable { mutableStateOf(false) }
@@ -301,6 +317,16 @@ private fun DailyTrackerApp(
 
     DisposableEffect(syncWorker) {
         onDispose { syncWorker.shutdownNow() }
+    }
+
+    // Each successful sync shows its message for about 3 seconds.
+    LaunchedEffect(lastSyncedAt) {
+        // Only for a sync that just happened, not when the value is restored after a rotation.
+        if (lastSyncedAt > 0L && System.currentTimeMillis() - lastSyncedAt < 5_000L) {
+            showSyncToast = true
+            delay(3_000)
+            showSyncToast = false
+        }
     }
 
     // Keeps "Synced 2 min ago" fresh.
@@ -516,7 +542,17 @@ private fun DailyTrackerApp(
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .navigationBarsPadding().padding(bottom = 10.dp)
             )
-            if (syncPhase != SyncPhase.SIGNED_OUT) {
+            // A success message appears at the top centre for a few seconds and fades away. A
+            // failure ("Offline", "Sync failed") stays until it is fixed or tapped, because it
+            // needs an action.
+            AnimatedVisibility(
+                visible = syncPhase == SyncPhase.OFFLINE || syncPhase == SyncPhase.ERROR ||
+                    (syncPhase == SyncPhase.SYNCED && showSyncToast),
+                modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding()
+                    .padding(top = 64.dp),
+                enter = fadeIn(tween(220)) + slideInVertically(tween(260, easing = FastOutSlowInEasing)) { -it / 2 },
+                exit = fadeOut(tween(400)) + slideOutVertically(tween(300, easing = FastOutSlowInEasing)) { -it / 2 }
+            ) {
                 SyncStatusPill(
                     phase = syncPhase,
                     lastSyncedAt = lastSyncedAt,
@@ -525,9 +561,7 @@ private fun DailyTrackerApp(
                         focusManager.clearFocus()
                         if (syncPhase == SyncPhase.OFFLINE || syncPhase == SyncPhase.ERROR) retrySync()
                         else showAccount = true
-                    },
-                    modifier = Modifier.align(Alignment.TopStart).statusBarsPadding()
-                        .padding(top = 12.dp, start = 20.dp)
+                    }
                 )
             }
             Row(

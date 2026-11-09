@@ -32,11 +32,16 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
-import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.saveable.Saver
@@ -319,18 +324,13 @@ internal fun DailyProgressScreen(
                         haptics.heavy()
                         noteEditorDate = date
                     },
-                    onPreviousMonth = {
-                        haptics.select()
-                        val target = displayedMonth.minusMonths(1)
-                        displayedMonth = target
-                        // Land on today (current month) or the 1st, never on a random future day.
-                        selectedDate = if (target == YearMonth.from(today)) today else target.atDay(1)
-                    },
-                    onNextMonth = {
-                        haptics.select()
-                        val target = displayedMonth.plusMonths(1)
-                        displayedMonth = target
-                        selectedDate = if (target == YearMonth.from(today)) today else target.atDay(1)
+                    onMonthChange = { target ->
+                        if (target != displayedMonth) {
+                            haptics.select()
+                            displayedMonth = target
+                            // Land on today (current month) or the 1st, never on a random future day.
+                            selectedDate = if (target == YearMonth.from(today)) today else target.atDay(1)
+                        }
                     },
                     onSelectDate = {
                         if (it != selectedDate) haptics.select()
@@ -424,6 +424,16 @@ internal fun DailyProgressScreen(
         NoteEditorDialog(
             date = date,
             dateLabel = date.format(selectedDateFormatter),
+            relative = run {
+                val days = java.time.temporal.ChronoUnit.DAYS.between(today, date)
+                when {
+                    days == 0L -> "Today"
+                    days == 1L -> "Tomorrow"
+                    days == -1L -> "Yesterday"
+                    days > 1L -> "In $days days"
+                    else -> "${-days} days ago"
+                }
+            },
             existing = notesByDate[date],
             onDismiss = { noteEditorDate = null },
             onSave = { text ->
@@ -550,8 +560,7 @@ private fun MonthCalendar(
     locale: Locale,
     notes: Map<LocalDate, String>,
     onLongPressDate: (LocalDate) -> Unit,
-    onPreviousMonth: () -> Unit,
-    onNextMonth: () -> Unit,
+    onMonthChange: (YearMonth) -> Unit,
     onSelectDate: (LocalDate) -> Unit
 ) {
     val firstDayOfWeek = WeekFields.of(locale).firstDayOfWeek
@@ -564,10 +573,40 @@ private fun MonthCalendar(
     }
     val labelFormatter = remember(locale) { DateTimeFormatter.ofPattern("MMMM yyyy", locale) }
 
+    // Months are pages of a pager: the neighbouring months sit next to the current one and move
+    // with the finger, and they are prepared in advance, so a swipe never has to build a grid.
+    val anchor = remember { YearMonth.of(2000, 1) }
+    fun pageOf(target: YearMonth): Int =
+        java.time.temporal.ChronoUnit.MONTHS.between(anchor, target).toInt()
+    val pagerState = rememberPagerState(initialPage = pageOf(month)) { 12 * 400 }
+    val latestMonth by rememberUpdatedState(month)
+    val latestOnMonthChange by rememberUpdatedState(onMonthChange)
+
+    // Swipe finished on a new month: tell the screen.
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            val settled = anchor.plusMonths(page.toLong())
+            if (settled != latestMonth) latestOnMonthChange(settled)
+        }
+    }
+    // The screen changed the month (arrow buttons, midnight, restore): move the pager to it.
+    LaunchedEffect(month) {
+        val target = pageOf(month)
+        if (pagerState.currentPage != target) {
+            if (kotlin.math.abs(pagerState.currentPage - target) == 1) {
+                pagerState.animateScrollToPage(target)
+            } else {
+                pagerState.scrollToPage(target)
+            }
+        }
+    }
+    // The title changes as soon as the swipe passes the middle.
+    val shownMonth = anchor.plusMonths(pagerState.currentPage.toLong())
+
     Column(Modifier.glassCard().padding(18.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             AnimatedContent(
-                targetState = month,
+                targetState = shownMonth,
                 modifier = Modifier.weight(1f),
                 transitionSpec = {
                     val direction = if (targetState > initialState) 1 else -1
@@ -582,9 +621,9 @@ private fun MonthCalendar(
                     style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Light)
                 )
             }
-            NavChevron(forward = false, description = "Previous month", onClick = onPreviousMonth)
+            NavChevron(forward = false, description = "Previous month", onClick = { onMonthChange(month.minusMonths(1)) })
             Spacer(Modifier.width(8.dp))
-            NavChevron(forward = true, description = "Next month", onClick = onNextMonth)
+            NavChevron(forward = true, description = "Next month", onClick = { onMonthChange(month.plusMonths(1)) })
         }
 
         Spacer(Modifier.height(16.dp))
@@ -602,74 +641,24 @@ private fun MonthCalendar(
         }
         Spacer(Modifier.height(8.dp))
 
-        // Render one 42-cell grid at a time. Keeping outgoing and incoming grids alive
-        // during AnimatedContent doubled the calendar's composition and drawing work.
-        val completed = completedFor(month)
-        val days = remember(month, locale) {
-            val built = buildCalendarDays(month, firstDayOfWeek)
-            built + List((42 - built.size).coerceAtLeast(0)) { null }
-        }
-        // Swipe left/right to change month. The grid follows the finger, then slides out and the
-        // next month slides in with a short spring. Only a graphicsLayer offset changes per frame,
-        // so nothing is recomposed while dragging.
-        var dragOffset by remember { mutableFloatStateOf(0f) }
-        var gridWidth by remember { mutableFloatStateOf(1f) }
-        val dragState = rememberDraggableState { delta -> dragOffset += delta }
-        Column(
-            Modifier.fillMaxWidth()
-                .onSizeChanged { gridWidth = it.width.toFloat().coerceAtLeast(1f) }
-                .graphicsLayer {
-                    translationX = dragOffset
-                    alpha = 1f - (kotlin.math.abs(dragOffset) / gridWidth).coerceIn(0f, 1f) * 0.7f
-                }
-                .draggable(
-                    state = dragState,
-                    orientation = Orientation.Horizontal,
-                    onDragStopped = { velocity ->
-                        val threshold = gridWidth * 0.22f
-                        val next = dragOffset < -threshold || velocity < -900f
-                        val previous = dragOffset > threshold || velocity > 900f
-                        if (next || previous) {
-                            val direction = if (next) -1f else 1f
-                            animate(dragOffset, direction * gridWidth * 0.6f, animationSpec = tween(110)) { v, _ ->
-                                dragOffset = v
-                            }
-                            if (next) onNextMonth() else onPreviousMonth()
-                            dragOffset = -direction * gridWidth * 0.35f
-                            animate(
-                                dragOffset, 0f,
-                                animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow)
-                            ) { v, _ -> dragOffset = v }
-                        } else {
-                            animate(
-                                dragOffset, 0f,
-                                animationSpec = spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMedium)
-                            ) { v, _ -> dragOffset = v }
-                        }
-                    }
-                )
-        ) {
-            days.chunked(7).forEach { week ->
-                Row(Modifier.fillMaxWidth()) {
-                    week.forEach { date ->
-                        if (date == null) {
-                            Spacer(Modifier.weight(1f).aspectRatio(1f).padding(2.dp))
-                        } else {
-                            CalendarDayCell(
-                                date = date,
-                                isToday = date == today,
-                                isSelected = date == selectedDate,
-                                isCompleted = date in completed,
-                                isFuture = date.isAfter(today),
-                                hasNote = date in notes,
-                                onClick = { onSelectDate(date) },
-                                onLongClick = { onLongPressDate(date) },
-                                modifier = Modifier.weight(1f).aspectRatio(1f).padding(2.dp)
-                            )
-                        }
-                    }
-                }
-            }
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxWidth(),
+            beyondViewportPageCount = 1,
+            key = { it }
+        ) { page ->
+            val pageMonth = anchor.plusMonths(page.toLong())
+            MonthGrid(
+                month = pageMonth,
+                firstDayOfWeek = firstDayOfWeek,
+                locale = locale,
+                completed = completedFor(pageMonth),
+                notes = notes,
+                selectedDate = selectedDate,
+                today = today,
+                onSelectDate = onSelectDate,
+                onLongPressDate = onLongPressDate
+            )
         }
 
         Spacer(Modifier.height(14.dp))
@@ -682,6 +671,48 @@ private fun MonthCalendar(
             LegendCheck(MaterialTheme.colorScheme.primary, "Completed")
             LegendItem(MaterialTheme.colorScheme.onSurface, "Today", outlined = true)
             LegendItem(NoteColor, "Note")
+        }
+    }
+}
+
+/** One month as a 6-week grid. Always 42 cells tall, so every page has the same height. */
+@Composable
+private fun MonthGrid(
+    month: YearMonth,
+    firstDayOfWeek: DayOfWeek,
+    locale: Locale,
+    completed: Set<LocalDate>,
+    notes: Map<LocalDate, String>,
+    selectedDate: LocalDate,
+    today: LocalDate,
+    onSelectDate: (LocalDate) -> Unit,
+    onLongPressDate: (LocalDate) -> Unit
+) {
+    val days = remember(month, locale) {
+        val built = buildCalendarDays(month, firstDayOfWeek)
+        built + List((42 - built.size).coerceAtLeast(0)) { null }
+    }
+    Column(Modifier.fillMaxWidth()) {
+        days.chunked(7).forEach { week ->
+            Row(Modifier.fillMaxWidth()) {
+                week.forEach { date ->
+                    if (date == null) {
+                        Spacer(Modifier.weight(1f).aspectRatio(1f).padding(2.dp))
+                    } else {
+                        CalendarDayCell(
+                            date = date,
+                            isToday = date == today,
+                            isSelected = date == selectedDate,
+                            isCompleted = date in completed,
+                            isFuture = date.isAfter(today),
+                            hasNote = date in notes,
+                            onClick = { onSelectDate(date) },
+                            onLongClick = { onLongPressDate(date) },
+                            modifier = Modifier.weight(1f).aspectRatio(1f).padding(2.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -937,20 +968,20 @@ private fun CompletionToggle(completed: Boolean, onChange: (Boolean) -> Unit) {
         }
         if (completed) {
             launch {
-                fill.animateTo(1f, spring(dampingRatio = 0.5f, stiffness = 420f))
+                fill.animateTo(1f, spring(dampingRatio = 0.55f, stiffness = 100f))
             }
             launch {
                 wobble.snapTo(1f)
-                wobble.animateTo(0f, spring(dampingRatio = 0.42f, stiffness = 170f))
+                wobble.animateTo(0f, spring(dampingRatio = 0.45f, stiffness = 55f))
             }
             launch {
                 tick.snapTo(0f)
-                delay(90)
-                tick.animateTo(1f, spring(dampingRatio = 0.72f, stiffness = 380f))
+                delay(220)
+                tick.animateTo(1f, spring(dampingRatio = 0.8f, stiffness = 120f))
             }
         } else {
-            launch { tick.animateTo(0f, tween(120)) }
-            launch { fill.animateTo(0f, spring(dampingRatio = 1f, stiffness = 700f)) }
+            launch { tick.animateTo(0f, tween(220)) }
+            launch { fill.animateTo(0f, spring(dampingRatio = 1f, stiffness = 260f)) }
             wobble.snapTo(0f)
         }
     }
@@ -1249,52 +1280,148 @@ private fun NoteCard(note: String, onEdit: () -> Unit) {
     }
 }
 
-/** Opens on long-press of a date. Saving empty text, or pressing Remove, deletes the note. */
+/**
+ * Opens on long-press of a date. A rounded dark card in the app's style: the date and how far away
+ * it is, a roomy text box that opens with the keyboard ready, and clear Save / Cancel / Remove
+ * actions. Saving empty text, or pressing Remove, deletes the note.
+ */
 @Composable
 private fun NoteEditorDialog(
     date: LocalDate,
     dateLabel: String,
+    relative: String,
     existing: String?,
     onDismiss: () -> Unit,
     onSave: (String) -> Unit
 ) {
+    val scheme = MaterialTheme.colorScheme
     var text by remember(date) { mutableStateOf(existing.orEmpty()) }
-    AlertDialog(
+    var focused by remember { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
+    val cardShape = RoundedCornerShape(32.dp)
+    val fieldShape = RoundedCornerShape(20.dp)
+    val borderColor by animateColorAsState(
+        targetValue = if (focused) NoteColor else Color.White.copy(alpha = 0.12f),
+        animationSpec = tween(200),
+        label = "note-field-border"
+    )
+    val canSave = text.isNotBlank()
+
+    LaunchedEffect(Unit) {
+        delay(150)
+        runCatching { focusRequester.requestFocus() }
+    }
+
+    Dialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (existing == null) "Add a note" else "Edit note") },
-        text = {
-            Column {
-                Text(
-                    dateLabel,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Spacer(Modifier.height(10.dp))
-                OutlinedTextField(
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Column(
+            Modifier.padding(horizontal = 20.dp).fillMaxWidth().widthIn(max = 420.dp)
+                .clip(cardShape)
+                .background(Brush.verticalGradient(listOf(Color(0xFF1F2B22), Color(0xFF151C17))))
+                .border(1.dp, Color.White.copy(alpha = 0.10f), cardShape)
+                .padding(22.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(36.dp).clip(CircleShape).background(NoteColor.copy(alpha = 0.18f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(Modifier.size(10.dp).clip(CircleShape).background(NoteColor))
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (existing == null) "NEW NOTE" else "EDIT NOTE",
+                        color = NoteColor,
+                        style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.8.sp)
+                    )
+                    Text(
+                        relative,
+                        color = scheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Text(
+                dateLabel,
+                color = scheme.onBackground,
+                style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Light, letterSpacing = (-0.3).sp)
+            )
+            Spacer(Modifier.height(16.dp))
+
+            Box(
+                Modifier.fillMaxWidth().heightIn(min = 112.dp)
+                    .clip(fieldShape)
+                    .background(Color.Black.copy(alpha = 0.22f))
+                    .border(1.dp, borderColor, fieldShape)
+                    .padding(16.dp)
+            ) {
+                BasicTextField(
                     value = text,
                     onValueChange = { if (it.length <= MAX_NOTE_LENGTH) text = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("e.g. Revise chemistry notes") },
-                    minLines = 2,
-                    maxLines = 5,
-                    supportingText = { Text("${text.length} / $MAX_NOTE_LENGTH") }
+                    modifier = Modifier.fillMaxWidth()
+                        .focusRequester(focusRequester)
+                        .onFocusChanged { focused = it.isFocused },
+                    textStyle = TextStyle(color = scheme.onSurface, fontSize = 16.sp, lineHeight = 23.sp),
+                    cursorBrush = SolidColor(NoteColor),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.Sentences
+                    ),
+                    decorationBox = { inner ->
+                        Box {
+                            if (text.isEmpty()) {
+                                Text(
+                                    "e.g. Revise chemistry notes",
+                                    color = scheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                    style = TextStyle(fontSize = 16.sp, lineHeight = 23.sp)
+                                )
+                            }
+                            inner()
+                        }
+                    }
                 )
             }
-        },
-        confirmButton = {
-            TextButton(onClick = { onSave(text) }, enabled = text.isNotBlank()) { Text("Save") }
-        },
-        dismissButton = {
-            Row {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "${text.length} / $MAX_NOTE_LENGTH",
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.End,
+                color = if (text.length > MAX_NOTE_LENGTH * 9 / 10) scheme.error else scheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelSmall
+            )
+
+            Spacer(Modifier.height(18.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 if (existing != null) {
                     TextButton(onClick = { onSave("") }) {
-                        Text("Remove", color = MaterialTheme.colorScheme.error)
+                        Text("Remove", color = scheme.error, fontWeight = FontWeight.Medium)
                     }
                 }
-                TextButton(onClick = onDismiss) { Text("Cancel") }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onDismiss) {
+                    Text("Cancel", color = scheme.onSurfaceVariant, fontWeight = FontWeight.Medium)
+                }
+                Spacer(Modifier.width(6.dp))
+                val saveSource = rememberPressSource()
+                Box(
+                    Modifier.pressScale(saveSource).clip(CircleShape)
+                        .background(if (canSave) NoteColor else NoteColor.copy(alpha = 0.25f))
+                        .hapticClickable(saveSource, enabled = canSave, haptic = { confirm() }) { onSave(text) }
+                        .padding(horizontal = 26.dp, vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "Save",
+                        color = Color(0xFF2A2108),
+                        style = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    )
+                }
             }
         }
-    )
+    }
 }
 
 private fun buildCalendarDays(

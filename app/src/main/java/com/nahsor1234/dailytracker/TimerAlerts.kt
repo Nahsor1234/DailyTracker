@@ -152,11 +152,15 @@ internal object TimerAlerts {
         }
     }
 
-    fun notificationsAllowed(context: Context): Boolean =
-        context.getSystemService(NotificationManager::class.java).areNotificationsEnabled() &&
+    fun notificationsAllowed(context: Context): Boolean {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val channelOff = manager.getNotificationChannel(AlarmNotifications.CHANNEL_RINGING)
+            ?.importance == NotificationManager.IMPORTANCE_NONE
+        return manager.areNotificationsEnabled() && !channelOff &&
             (Build.VERSION.SDK_INT < 33 ||
                 context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED)
+    }
 
     private fun alarmPrefs(context: Context) =
         context.getSharedPreferences(ALARM_PREFS, Context.MODE_PRIVATE)

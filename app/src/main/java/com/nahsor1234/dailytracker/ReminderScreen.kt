@@ -54,6 +54,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.flow.drop
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
@@ -187,6 +188,12 @@ internal fun ReminderScreen(onBack: () -> Unit) {
             initialMinute = minute,
             is24Hour = android.text.format.DateFormat.is24HourFormat(context)
         )
+        // A short tick each time the hour, the minute or AM/PM changes, for notifications and alarms.
+        LaunchedEffect(timeState) {
+            snapshotFlow { Triple(timeState.hour, timeState.minute, timeState.isAfternoon) }
+                .drop(1)
+                .collect { haptics.tick() }
+        }
         AlertDialog(
             onDismissRequest = { showTimePicker = false },
             containerColor = colors.surface,
