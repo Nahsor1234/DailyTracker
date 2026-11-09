@@ -452,6 +452,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
     val alertSettings = remember { TimerAlertSettings(context) }
     var soundOn by remember { mutableStateOf(alertSettings.soundEnabled) }
     var vibrationOn by remember { mutableStateOf(alertSettings.vibrationEnabled) }
+    var keepScreenOn by remember { mutableStateOf(alertSettings.keepScreenOn) }
     var ringtoneUri by remember { mutableStateOf(alertSettings.ringtoneUri) }
     var notificationsBlocked by remember { mutableStateOf(false) }
     val ringtoneTitle by produceState("Default alarm", ringtoneUri) {
@@ -473,6 +474,23 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted -> notificationsBlocked = !granted }
+
+    // Re-check every time the Timer screen is shown, so a blocked notification is flagged here
+    // before a countdown ever runs, not only once at the first start.
+    LaunchedEffect(active) {
+        if (active) notificationsBlocked = !TimerAlerts.notificationsAllowed(context)
+    }
+
+    // "Keep screen on": only while the Timer screen is the one being shown, in Countdown mode and
+    // with the option switched on. The flag is released as soon as any of those stops being true
+    // (leaving the screen, switching to Stopwatch, switching the option off), so normal screen
+    // timeout applies everywhere else.
+    val hostView = androidx.compose.ui.platform.LocalView.current
+    val holdScreenAwake = keepScreenOn && active && mode == TimerMode.COUNTDOWN
+    DisposableEffect(holdScreenAwake, hostView) {
+        if (holdScreenAwake) hostView.keepScreenOn = true
+        onDispose { if (holdScreenAwake) hostView.keepScreenOn = false }
+    }
 
     // The screen stays composed while Progress is shown. All readings are derived from the
     // elapsed-realtime clock, so while hidden there is nothing to redraw at 20 Hz: a running
@@ -509,14 +527,17 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
             remainingBase = 0L
             countdownRunning = false
             finished = true
-            // The screen handles the alert itself, so the system alarm is no longer needed.
-            TimerAlerts.cancel(context)
-            TimerAlerts.dismissNotification(context)
-            // Ring only if the countdown ended just now. If it ended while the app was away, the
-            // notification has already told the user.
-            if (overdue < 3_000L) {
-                haptics.confirm()
-                TimerAlarmPlayer.start(context, alertSettings)
+            // Only take over from the system alarm while the app is actually on screen. In the
+            // background the system alarm (ringing service + notification with a Stop button) is
+            // already handling it; cancelling it here is what used to leave the sound playing with
+            // no notification to stop it.
+            if (TimerAlertState.appInForeground) {
+                TimerAlerts.cancel(context)
+                TimerAlerts.dismissNotification(context)
+                if (overdue < 3_000L) {
+                    haptics.confirm()
+                    TimerAlarmPlayer.start(context, alertSettings)
+                }
             }
         }
     }
@@ -668,6 +689,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
                 TimerAlertsCard(
                     soundOn = soundOn,
                     vibrationOn = vibrationOn,
+                    keepScreenOn = keepScreenOn,
                     soundName = ringtoneTitle,
                     notificationsBlocked = notificationsBlocked,
                     onSoundChange = {
@@ -678,6 +700,11 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
                     onVibrationChange = {
                         vibrationOn = it
                         alertSettings.vibrationEnabled = it
+                        haptics.toggle(it)
+                    },
+                    onKeepScreenOnChange = {
+                        keepScreenOn = it
+                        alertSettings.keepScreenOn = it
                         haptics.toggle(it)
                     },
                     onPickSound = {
@@ -710,10 +737,12 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
 private fun TimerAlertsCard(
     soundOn: Boolean,
     vibrationOn: Boolean,
+    keepScreenOn: Boolean,
     soundName: String,
     notificationsBlocked: Boolean,
     onSoundChange: (Boolean) -> Unit,
     onVibrationChange: (Boolean) -> Unit,
+    onKeepScreenOnChange: (Boolean) -> Unit,
     onPickSound: () -> Unit,
     onTest: () -> Unit
 ) {
@@ -728,7 +757,7 @@ private fun TimerAlertsCard(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "WHEN TIME IS UP", color = colors.primary,
+                "COUNTDOWN OPTIONS", color = colors.primary,
                 style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.8.sp)
             )
             Spacer(Modifier.weight(1f))
@@ -755,6 +784,14 @@ private fun TimerAlertsCard(
             subtitle = if (vibrationOn) "On" else "Off",
             checked = vibrationOn,
             onCheckedChange = onVibrationChange,
+            onBodyClick = null
+        )
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+        AlertToggleRow(
+            title = "Keep screen on",
+            subtitle = if (keepScreenOn) "Screen stays awake on this countdown screen" else "Off",
+            checked = keepScreenOn,
+            onCheckedChange = onKeepScreenOnChange,
             onBodyClick = null
         )
         if (notificationsBlocked) {
@@ -954,12 +991,17 @@ private fun TimerControls(
         horizontalArrangement = Arrangement.spacedBy(28.dp)
     ) {
         Box(
-            Modifier.pressScale(resetSource).size(64.dp).alpha(if (canReset) 1f else 0.35f).clip(CircleShape)
-                .border(1.dp, Color.White.copy(alpha = 0.14f), CircleShape)
+            Modifier.pressScale(resetSource).size(64.dp).alpha(if (canReset) 1f else 0.45f).clip(CircleShape)
+                .border(1.dp, Color.White.copy(alpha = 0.24f), CircleShape)
                 .hapticClickable(resetSource, enabled = canReset, haptic = { heavy() }) { onReset() },
             contentAlignment = Alignment.Center
         ) {
-            Text("Reset", color = colors.onSurfaceVariant, style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium))
+            Text(
+                "Reset",
+                // A little brighter than before (about 10% more contrast); size and weight unchanged.
+                color = androidx.compose.ui.graphics.lerp(colors.onSurfaceVariant, colors.onSurface, 0.35f),
+                style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            )
         }
         Box(
             Modifier.pressScale(startSource, 0.9f).size(88.dp).alpha(if (startEnabled) 1f else 0.35f).clip(CircleShape)

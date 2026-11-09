@@ -28,6 +28,24 @@ internal class DailyTrackerCloud(context: Context) {
     data class Account(val id: String, val email: String, val verified: Boolean)
     data class AuthCallback(val type: String, val account: Account)
 
+    /** A sign-in / verification / recovery link that has been read but not yet accepted. */
+    data class PendingAuthLink(
+        val type: String,
+        val email: String,
+        internal val accessToken: String,
+        internal val refreshToken: String,
+        internal val expiresAt: Long
+    )
+
+    /** Temporary problem (offline, timeout, server busy). The session itself is still fine. */
+    class CloudTransientException(message: String, cause: Throwable? = null) :
+        IllegalStateException(message, cause)
+
+    /** The session is missing, expired or rejected: the user has to sign in again. */
+    class CloudAuthException(message: String) : IllegalStateException(message)
+
+    private class HttpStatusException(val code: Int, message: String) : IllegalStateException(message)
+
     data class CloudEntry(
         val date: LocalDate,
         val completed: Boolean,
@@ -48,12 +66,17 @@ internal class DailyTrackerCloud(context: Context) {
     @Synchronized
     fun currentAccount(): Account? {
         val saved = storage.read() ?: return null
-        return if (saved.expiresAt > Instant.now().epochSecond + 60) {
+        if (saved.expiresAt > Instant.now().epochSecond + 60) {
+            return Account(saved.userId, saved.email, saved.verified)
+        }
+        return try {
+            val refreshed = refresh(saved.refreshToken)
+            Account(refreshed.userId, refreshed.email, refreshed.verified)
+        } catch (offline: CloudTransientException) {
+            // No connection right now: the saved session is still valid, so stay signed in.
             Account(saved.userId, saved.email, saved.verified)
-        } else {
-            runCatching { refresh(saved.refreshToken) }
-                .getOrNull()
-                ?.let { Account(it.userId, it.email, it.verified) }
+        } catch (other: Exception) {
+            null
         }
     }
 
@@ -113,8 +136,13 @@ internal class DailyTrackerCloud(context: Context) {
         storage.clear()
     }
 
+    /**
+     * Reads a callback link and checks its shape. Nothing is stored and no session changes until the
+     * user confirms it with [completeAuthCallback], so a link opened by accident (or one crafted by
+     * someone else) cannot silently switch the signed-in account.
+     */
     @Synchronized
-    fun acceptAuthCallback(uri: Uri): AuthCallback {
+    fun parseAuthCallback(uri: Uri): PendingAuthLink {
         require(
             uri.scheme == "com.nahsor1234.dailytracker" &&
                 uri.host == "auth" &&
@@ -157,36 +185,57 @@ internal class DailyTrackerCloud(context: Context) {
                 Charsets.UTF_8
             )
         )
+        require(claims.optString("sub").isNotBlank()) { "The authentication token is invalid." }
         val expiry = parameters["expires_at"]?.toLongOrNull()
             ?: (Instant.now().epochSecond + (parameters["expires_in"]?.toLongOrNull() ?: 3600L))
+        return PendingAuthLink(
+            type = type,
+            email = claims.optString("email"),
+            accessToken = accessToken,
+            refreshToken = refreshToken,
+            expiresAt = expiry
+        )
+    }
+
+    /** Accepts a link the user has confirmed: stores its session and loads the account. */
+    @Synchronized
+    fun completeAuthCallback(link: PendingAuthLink): AuthCallback {
+        val previous = storage.read()
         storage.write(
             Session(
-                accessToken = accessToken,
-                refreshToken = refreshToken,
-                expiresAt = expiry,
-                userId = claims.getString("sub"),
-                email = claims.optString("email"),
+                accessToken = link.accessToken,
+                refreshToken = link.refreshToken,
+                expiresAt = link.expiresAt,
+                userId = "",
+                email = link.email,
                 verified = false
             )
         )
-
-        val user = request("GET", "/auth/v1/user", null, authenticated = true) as JSONObject
-        val verifiedAt = user.optString("email_confirmed_at")
-        val session = Session(
-            accessToken = accessToken,
-            refreshToken = refreshToken,
-            expiresAt = expiry,
-            userId = user.getString("id"),
-            email = user.optString("email"),
-            verified = verifiedAt.isNotBlank() && verifiedAt != "null"
-        )
-        storage.write(session)
-        return AuthCallback(type, Account(session.userId, session.email, session.verified))
+        try {
+            val user = request("GET", "/auth/v1/user", null, authenticated = true) as JSONObject
+            val verifiedAt = user.optString("email_confirmed_at")
+            val session = Session(
+                accessToken = link.accessToken,
+                refreshToken = link.refreshToken,
+                expiresAt = link.expiresAt,
+                userId = user.getString("id"),
+                email = user.optString("email"),
+                verified = verifiedAt.isNotBlank() && verifiedAt != "null"
+            )
+            storage.write(session)
+            return AuthCallback(link.type, Account(session.userId, session.email, session.verified))
+        } catch (failure: Exception) {
+            // The link did not produce a usable account: put back whatever session was there before.
+            if (previous != null) storage.write(previous) else storage.clear()
+            throw failure
+        }
     }
 
     @Synchronized
     fun updatePassword(newPassword: String): Account {
-        require(newPassword.length >= 6) { "Password must contain at least 6 characters." }
+        require(newPassword.length >= MIN_PASSWORD_LENGTH) {
+            "Password must contain at least $MIN_PASSWORD_LENGTH characters."
+        }
         request(
             "PUT",
             "/auth/v1/user",
@@ -202,24 +251,19 @@ internal class DailyTrackerCloud(context: Context) {
      */
     @Synchronized
     fun sync(localEntries: List<CloudEntry>): List<CloudEntry> {
-        val account = currentAccount() ?: error("Your session has expired. Sign in again.")
-        require(account.verified) { "Verify your email before syncing DailyTracker data." }
-        val session = requireNotNull(storage.read()) { "Authentication required." }
-        require(session.userId == account.id) { "The signed-in account changed. Sign in again." }
+        val account = currentAccount() ?: throw CloudAuthException("Your session has expired. Sign in again.")
+        if (!account.verified) throw CloudAuthException("Verify your email before syncing DailyTracker data.")
+        val session = storage.read() ?: throw CloudAuthException("Your session has expired. Sign in again.")
+        if (session.userId != account.id) throw CloudAuthException("The signed-in account changed. Sign in again.")
 
         val remoteRows = fetchAllRemoteEntries()
-        val remoteByDate = remoteRows.associateBy { it.getString("local_date") }
-        val merged = remoteRows.associate { row ->
-            val entry = row.toCloudEntry()
-            entry.date to entry
-        }.toMutableMap()
-        val uploads = JSONArray()
+        val revisionByDate = remoteRows.associate { it.getString("local_date") to it.optLong("revision") }
+        val result = DailyMerge.merge(localEntries, remoteRows.map { it.toCloudEntry() })
 
-        for (local in localEntries) {
-            val key = local.date.toString()
-            val remote = remoteByDate[key]
-            val remoteEntry = remote?.toCloudEntry()
-            if (remoteEntry == null || local.updatedAt > remoteEntry.updatedAt) {
+        if (result.uploads.isNotEmpty()) {
+            val uploads = JSONArray()
+            for (local in result.uploads) {
+                val key = local.date.toString()
                 uploads.put(
                     JSONObject()
                         .put("user_id", session.userId)
@@ -228,14 +272,9 @@ internal class DailyTrackerCloud(context: Context) {
                         .put("description", local.description)
                         .put("time_zone_id", local.timeZoneId)
                         .put("updated_at", Instant.ofEpochMilli(local.updatedAt).toString())
-                        .put("revision", (remote?.optLong("revision") ?: 0L) + 1L)
+                        .put("revision", (revisionByDate[key] ?: 0L) + 1L)
                 )
-                merged[local.date] = local
             }
-            // If remote is newer or timestamps tie, merged already contains the remote row.
-        }
-
-        if (uploads.length() > 0) {
             request(
                 "POST",
                 "/rest/v1/daily_progress?on_conflict=user_id,local_date",
@@ -245,7 +284,7 @@ internal class DailyTrackerCloud(context: Context) {
             )
         }
 
-        return merged.values.sortedBy { it.date }
+        return result.merged
     }
 
     private fun fetchAllRemoteEntries(): List<JSONObject> {
@@ -309,7 +348,49 @@ internal class DailyTrackerCloud(context: Context) {
         )
     }
 
+    /**
+     * Sends a request and turns failures into two kinds the UI can treat differently: temporary
+     * ones ([CloudTransientException]) and sign-in problems ([CloudAuthException]). A rejected
+     * access token is refreshed once and the request is retried.
+     */
     private fun request(
+        method: String,
+        path: String,
+        body: Any?,
+        authenticated: Boolean,
+        extraHeaders: Map<String, String> = emptyMap()
+    ): Any {
+        try {
+            return rawRequest(method, path, body, authenticated, extraHeaders)
+        } catch (first: HttpStatusException) {
+            if (authenticated && first.code == 401) {
+                val saved = storage.read() ?: throw CloudAuthException("Your session has expired. Sign in again.")
+                try {
+                    refresh(saved.refreshToken)
+                } catch (offline: CloudTransientException) {
+                    throw offline
+                } catch (rejected: Exception) {
+                    throw CloudAuthException("Your session has expired. Sign in again.")
+                }
+                try {
+                    return rawRequest(method, path, body, authenticated, extraHeaders)
+                } catch (second: HttpStatusException) {
+                    throw mapHttpFailure(second, authenticated)
+                }
+            }
+            throw mapHttpFailure(first, authenticated)
+        }
+    }
+
+    private fun mapHttpFailure(failure: HttpStatusException, authenticated: Boolean): Exception = when {
+        failure.code == 429 || failure.code >= 500 ->
+            CloudTransientException("The server is busy right now. Try again in a moment.", failure)
+        authenticated && failure.code == 401 ->
+            CloudAuthException("Your session has expired. Sign in again.")
+        else -> failure
+    }
+
+    private fun rawRequest(
         method: String,
         path: String,
         body: Any?,
@@ -353,20 +434,26 @@ internal class DailyTrackerCloud(context: Context) {
                         .ifBlank { error.optString("message") }
                         .ifBlank { error.optString("error_description") }
                 }.getOrDefault("")
-                throw IllegalStateException(message.ifBlank { "Supabase request failed ($code)." })
+                throw HttpStatusException(code, message.ifBlank { "Request failed ($code)." })
             }
             return when {
                 responseText.isBlank() -> JSONObject()
                 responseText.trimStart().startsWith("[") -> JSONArray(responseText)
                 else -> JSONObject(responseText)
             }
+        } catch (io: java.io.IOException) {
+            throw CloudTransientException(
+                "No connection. Your changes are saved on this device and will sync when you are back online.",
+                io
+            )
         } finally {
             connection.disconnect()
         }
     }
 
-    private companion object {
+    internal companion object {
         const val AUTH_REDIRECT_URI = "com.nahsor1234.dailytracker://auth/callback"
+        const val MIN_PASSWORD_LENGTH = 8
     }
 }
 

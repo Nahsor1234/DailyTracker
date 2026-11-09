@@ -1,7 +1,5 @@
 package com.nahsor1234.dailytracker
 
-import android.app.DatePickerDialog
-import android.app.TimePickerDialog
 import android.content.Intent
 import android.net.Uri
 import android.media.RingtoneManager
@@ -29,6 +27,14 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDefaults
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.SelectableDates
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -48,11 +54,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.flow.drop
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ReminderScreen(onBack: () -> Unit) {
     val context = LocalContext.current
@@ -69,6 +77,8 @@ internal fun ReminderScreen(onBack: () -> Unit) {
     var ringtoneUri by remember { mutableStateOf<String?>(null) }
     var deleteConfirmation by remember { mutableStateOf<TrackerReminder?>(null) }
     var message by remember { mutableStateOf<String?>(null) }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var showTimePicker by remember { mutableStateOf(false) }
     val haptics = rememberHaptics()
 
     val ringtonePicker = rememberLauncherForActivityResult(
@@ -142,6 +152,64 @@ internal fun ReminderScreen(onBack: () -> Unit) {
     } && (Build.VERSION.SDK_INT < 33 ||
         context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
         android.content.pm.PackageManager.PERMISSION_GRANTED)
+
+    // Material 3 pickers. The date picker only allows today or later, as the old dialog did.
+    if (showDatePicker) {
+        val utc = java.time.ZoneOffset.UTC
+        val dateState = rememberDatePickerState(
+            initialSelectedDateMillis = date.atStartOfDay(utc).toInstant().toEpochMilli(),
+            selectableDates = object : SelectableDates {
+                override fun isSelectableDate(utcTimeMillis: Long): Boolean =
+                    !java.time.Instant.ofEpochMilli(utcTimeMillis).atZone(utc).toLocalDate()
+                        .isBefore(LocalDate.now())
+            }
+        )
+        val pickerColors = DatePickerDefaults.colors(containerColor = colors.surface)
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            colors = pickerColors,
+            confirmButton = {
+                TextButton(onClick = {
+                    dateState.selectedDateMillis?.let {
+                        date = java.time.Instant.ofEpochMilli(it).atZone(utc).toLocalDate()
+                    }
+                    message = null
+                    showDatePicker = false
+                }) { Text("OK") }
+            },
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("Cancel") } }
+        ) {
+            DatePicker(state = dateState, colors = pickerColors)
+        }
+    }
+    if (showTimePicker) {
+        val timeState = rememberTimePickerState(
+            initialHour = hour,
+            initialMinute = minute,
+            is24Hour = android.text.format.DateFormat.is24HourFormat(context)
+        )
+        // A short tick each time the hour or minute changes (AM/PM included, it moves the hour by 12).
+        LaunchedEffect(timeState) {
+            snapshotFlow { timeState.hour * 60 + timeState.minute }
+                .drop(1)
+                .collect { haptics.tick() }
+        }
+        AlertDialog(
+            onDismissRequest = { showTimePicker = false },
+            containerColor = colors.surface,
+            title = { Text("Select time") },
+            text = { TimePicker(state = timeState) },
+            confirmButton = {
+                TextButton(onClick = {
+                    hour = timeState.hour
+                    minute = timeState.minute
+                    message = null
+                    showTimePicker = false
+                }) { Text("OK") }
+            },
+            dismissButton = { TextButton(onClick = { showTimePicker = false }) { Text("Cancel") } }
+        )
+    }
 
     Surface(Modifier.fillMaxSize(), color = colors.background) {
         Column(
@@ -247,13 +315,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
                         label = "Date",
                         value = date.format(DateTimeFormatter.ofPattern("EEE, d MMM yyyy", Locale.getDefault()))
                     ) {
-                        DatePickerDialog(
-                            context,
-                            { _, year, month, day -> date = LocalDate.of(year, month + 1, day) },
-                            date.year, date.monthValue - 1, date.dayOfMonth
-                        ).apply {
-                            datePicker.minDate = System.currentTimeMillis() - 1_000L
-                        }.show()
+                        showDatePicker = true
                     }
                 }
                 Spacer(Modifier.height(14.dp))
@@ -261,14 +323,7 @@ internal fun ReminderScreen(onBack: () -> Unit) {
                     label = "Time",
                     value = LocalTime.of(hour, minute).format(DateTimeFormatter.ofPattern("hh:mm a", Locale.getDefault()))
                 ) {
-                    TimePickerDialog(
-                        context,
-                        { _, selectedHour, selectedMinute ->
-                            hour = selectedHour
-                            minute = selectedMinute
-                        },
-                        hour, minute, android.text.format.DateFormat.is24HourFormat(context)
-                    ).show()
+                    showTimePicker = true
                 }
                 Spacer(Modifier.height(18.dp))
 

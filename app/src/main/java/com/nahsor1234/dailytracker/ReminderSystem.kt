@@ -30,34 +30,39 @@ internal data class TrackerReminder(
 internal class ReminderStore(context: Context) {
     private val preferences = context.applicationContext.getSharedPreferences("tracker_reminders", Context.MODE_PRIVATE)
 
-    @Synchronized
-    fun all(): List<TrackerReminder> {
+    // One lock shared by every ReminderStore instance (the UI and the alarm receivers each create
+    // their own), so a read-modify-write can never interleave with another one.
+    private fun <T> locked(block: () -> T): T = synchronized(LOCK, block)
+
+    fun all(): List<TrackerReminder> = locked {
         val json = preferences.getString(KEY_REMINDERS, "[]") ?: "[]"
-        return runCatching {
-            val array = JSONArray(json)
-            buildList {
-                for (index in 0 until array.length()) {
+        val array = runCatching { JSONArray(json) }.getOrNull() ?: return@locked emptyList()
+        // A damaged entry is skipped on its own; it must not make every other reminder disappear.
+        buildList {
+            for (index in 0 until array.length()) {
+                runCatching {
                     val item = array.getJSONObject(index)
-                    add(
-                        TrackerReminder(
-                            id = item.getLong("id"),
-                            title = item.getString("title"),
-                            kind = ReminderKind.valueOf(item.getString("kind")),
-                            hour = item.getInt("hour"),
-                            minute = item.getInt("minute"),
-                            daily = item.getBoolean("daily"),
-                            dateEpochDay = item.getLong("date"),
-                            enabled = item.getBoolean("enabled"),
-                            ringtoneUri = item.optString("ringtoneUri").takeIf { it.isNotBlank() }
-                        )
+                    TrackerReminder(
+                        id = item.getLong("id"),
+                        title = item.getString("title"),
+                        kind = ReminderKind.valueOf(item.getString("kind")),
+                        hour = item.getInt("hour"),
+                        minute = item.getInt("minute"),
+                        daily = item.getBoolean("daily"),
+                        dateEpochDay = item.getLong("date"),
+                        enabled = item.getBoolean("enabled"),
+                        ringtoneUri = item.optString("ringtoneUri").takeIf { it.isNotBlank() }
                     )
-                }
+                }.getOrNull()?.let { add(it) }
             }
-        }.getOrDefault(emptyList())
+        }
     }
 
-    @Synchronized
-    fun save(reminders: List<TrackerReminder>) {
+    fun save(reminders: List<TrackerReminder>) = locked {
+        saveUnlocked(reminders)
+    }
+
+    private fun saveUnlocked(reminders: List<TrackerReminder>) {
         val array = JSONArray()
         reminders.forEach { reminder ->
             array.put(
@@ -78,17 +83,18 @@ internal class ReminderStore(context: Context) {
         preferences.edit().putString(KEY_REMINDERS, array.toString()).commit()
     }
 
-    fun upsert(reminder: TrackerReminder) {
+    fun upsert(reminder: TrackerReminder) = locked {
         val updated = all().filterNot { it.id == reminder.id } + reminder
-        save(updated.sortedBy { it.hour * 60 + it.minute })
+        saveUnlocked(updated.sortedBy { it.hour * 60 + it.minute })
     }
 
-    fun remove(id: Long) = save(all().filterNot { it.id == id })
+    fun remove(id: Long) = locked { saveUnlocked(all().filterNot { it.id == id }) }
 
     fun find(id: Long): TrackerReminder? = all().firstOrNull { it.id == id }
 
     companion object {
         private const val KEY_REMINDERS = "reminders_json"
+        private val LOCK = Any()
     }
 }
 

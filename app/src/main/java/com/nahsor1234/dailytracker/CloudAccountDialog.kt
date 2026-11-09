@@ -10,6 +10,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.autofill.ContentType
+import androidx.compose.ui.semantics.contentType
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -123,8 +125,8 @@ internal fun CloudAccountDialog(
 
     // ---- actions (logic unchanged from the previous dialog) ---------------------------------
     fun submitSignIn() {
-        if (!email.contains("@") || password.length < 6) {
-            message = "Enter a valid email and a password of at least 6 characters."
+        if (!looksLikeEmail(email) || password.isEmpty()) {
+            message = "Enter your email address and password."
             messageIsError = true
             return
         }
@@ -146,8 +148,13 @@ internal fun CloudAccountDialog(
     }
 
     fun submitSignUp() {
-        if (!email.contains("@") || password.length < 6) {
-            message = "Enter a valid email and a password of at least 6 characters."
+        if (!looksLikeEmail(email)) {
+            message = "Enter a valid email address."
+            messageIsError = true
+            return
+        }
+        if (password.length < DailyTrackerCloud.MIN_PASSWORD_LENGTH) {
+            message = "Choose a password of at least ${DailyTrackerCloud.MIN_PASSWORD_LENGTH} characters."
             messageIsError = true
             return
         }
@@ -202,8 +209,8 @@ internal fun CloudAccountDialog(
 
     fun submitNewPassword() {
         when {
-            newPassword.length < 6 -> {
-                message = "Password must contain at least 6 characters."
+            newPassword.length < DailyTrackerCloud.MIN_PASSWORD_LENGTH -> {
+                message = "Password must contain at least ${DailyTrackerCloud.MIN_PASSWORD_LENGTH} characters."
                 messageIsError = true
             }
             newPassword != confirmNewPassword -> {
@@ -375,6 +382,14 @@ private fun SignedOutContent(
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
+    Spacer(Modifier.height(6.dp))
+    Text(
+        "The history already saved on this phone is linked to the first account you sign in with. " +
+            "Signing out never deletes anything.",
+        textAlign = TextAlign.Center,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
+    )
     Spacer(Modifier.height(20.dp))
 
     ModeSwitch(creating = creating, enabled = !busy, onChange = onModeChange)
@@ -382,12 +397,14 @@ private fun SignedOutContent(
 
     AuthField(
         value = email, onValueChange = onEmailChange, label = "Email",
-        enabled = !busy, keyboardType = KeyboardType.Email
+        enabled = !busy, keyboardType = KeyboardType.Email,
+        contentType = ContentType.EmailAddress
     )
     Spacer(Modifier.height(12.dp))
     AuthField(
         value = password, onValueChange = onPasswordChange, label = "Password",
         enabled = !busy, keyboardType = KeyboardType.Password,
+        contentType = if (creating) ContentType.NewPassword else ContentType.Password,
         password = true, showPassword = showPassword, onToggleShow = onToggleShow
     )
 
@@ -399,7 +416,7 @@ private fun SignedOutContent(
     } else {
         Spacer(Modifier.height(6.dp))
         Text(
-            "Use at least 6 characters. We'll email you a link to verify the address.",
+            "Use at least ${DailyTrackerCloud.MIN_PASSWORD_LENGTH} characters. We'll email you a link to verify the address.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.fillMaxWidth()
@@ -510,12 +527,14 @@ private fun RecoveryContent(
     AuthField(
         value = newPassword, onValueChange = onNewPasswordChange, label = "New password",
         enabled = !busy, keyboardType = KeyboardType.Password,
+        contentType = ContentType.NewPassword,
         password = true, showPassword = showPassword, onToggleShow = onToggleShow
     )
     Spacer(Modifier.height(12.dp))
     AuthField(
         value = confirmNewPassword, onValueChange = onConfirmChange, label = "Confirm new password",
         enabled = !busy, keyboardType = KeyboardType.Password,
+        contentType = ContentType.NewPassword,
         password = true, showPassword = showPassword, onToggleShow = onToggleShow
     )
     if (syncStatus.isNotBlank()) {
@@ -601,6 +620,7 @@ private fun AuthField(
     label: String,
     enabled: Boolean,
     keyboardType: KeyboardType,
+    contentType: ContentType? = null,
     password: Boolean = false,
     showPassword: Boolean = false,
     onToggleShow: () -> Unit = {}
@@ -641,7 +661,9 @@ private fun AuthField(
             focusedTextColor = scheme.onSurface,
             unfocusedTextColor = scheme.onSurface
         ),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth().then(
+            if (contentType != null) Modifier.semantics { this.contentType = contentType } else Modifier
+        )
     )
 }
 
@@ -738,3 +760,6 @@ private fun StatusBanner(message: String, isError: Boolean) {
             .padding(horizontal = 14.dp, vertical = 10.dp)
     )
 }
+
+private fun looksLikeEmail(value: String): Boolean =
+    android.util.Patterns.EMAIL_ADDRESS.matcher(value.trim()).matches()

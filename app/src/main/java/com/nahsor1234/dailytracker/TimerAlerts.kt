@@ -41,6 +41,11 @@ internal class TimerAlertSettings(context: Context) {
             prefs.edit().apply { if (value == null) remove(KEY_RINGTONE) else putString(KEY_RINGTONE, value) }.apply()
         }
 
+    /** Keeps the screen awake while the countdown screen is open. Off by default. */
+    var keepScreenOn: Boolean
+        get() = prefs.getBoolean(KEY_KEEP_AWAKE, false)
+        set(value) { prefs.edit().putBoolean(KEY_KEEP_AWAKE, value).apply() }
+
     var notificationPermissionAsked: Boolean
         get() = prefs.getBoolean(KEY_ASKED, false)
         set(value) { prefs.edit().putBoolean(KEY_ASKED, value).apply() }
@@ -55,6 +60,7 @@ internal class TimerAlertSettings(context: Context) {
         const val KEY_VIBRATION = "vibration"
         const val KEY_RINGTONE = "ringtone"
         const val KEY_ASKED = "notification_permission_asked"
+        const val KEY_KEEP_AWAKE = "keep_screen_on"
     }
 }
 
@@ -146,11 +152,15 @@ internal object TimerAlerts {
         }
     }
 
-    fun notificationsAllowed(context: Context): Boolean =
-        context.getSystemService(NotificationManager::class.java).areNotificationsEnabled() &&
+    fun notificationsAllowed(context: Context): Boolean {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val channelOff = manager.getNotificationChannel(AlarmNotifications.CHANNEL_RINGING)
+            ?.importance == NotificationManager.IMPORTANCE_NONE
+        return manager.areNotificationsEnabled() && !channelOff &&
             (Build.VERSION.SDK_INT < 33 ||
                 context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED)
+    }
 
     private fun alarmPrefs(context: Context) =
         context.getSharedPreferences(ALARM_PREFS, Context.MODE_PRIVATE)

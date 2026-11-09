@@ -7,6 +7,7 @@ import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
@@ -28,7 +29,26 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.layout.onSizeChanged
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
@@ -77,6 +97,13 @@ import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 private const val MAX_DESCRIPTION_LENGTH = 5_000
+private const val MAX_NOTE_LENGTH = 500
+
+/** Dates with a note are tinted with this warm colour (completed days use the green primary). */
+private val NoteColor = Color(0xFFE8C77A)
+
+private val YearMonthSaver = Saver<YearMonth, String>(save = { it.toString() }, restore = { YearMonth.parse(it) })
+private val LocalDateSaver = Saver<LocalDate, String>(save = { it.toString() }, restore = { LocalDate.parse(it) })
 
 private enum class SaveState {
     IDLE,
@@ -97,8 +124,12 @@ internal fun DailyProgressScreen(
 ) {
     val locale = remember { Locale.getDefault() }
 
-    var displayedMonth by remember { mutableStateOf(YearMonth.from(today)) }
-    var selectedDate by remember { mutableStateOf(today) }
+    // Saved, so rotating the phone keeps the month and day you were looking at.
+    var displayedMonth by rememberSaveable(stateSaver = YearMonthSaver) { mutableStateOf(YearMonth.from(today)) }
+    var selectedDate by rememberSaveable(stateSaver = LocalDateSaver) { mutableStateOf(today) }
+    var knownToday by rememberSaveable(stateSaver = LocalDateSaver) { mutableStateOf(today) }
+    val notesByDate = remember { mutableStateMapOf<LocalDate, String>() }
+    var noteEditorDate by remember { mutableStateOf<LocalDate?>(null) }
     var selectedEntry by remember { mutableStateOf<DailyEntry?>(null) }
     // Completed days per month. The neighbouring months are kept cached, so changing month never
     // shows an empty calendar or month strip while the database answers.
@@ -118,9 +149,13 @@ internal fun DailyProgressScreen(
         onDispose { screenActive.set(false) }
     }
 
+    // Jump to the new day only when the date really changed (midnight), not on every recreation.
     LaunchedEffect(today) {
-        displayedMonth = YearMonth.from(today)
-        selectedDate = today
+        if (knownToday != today) {
+            knownToday = today
+            displayedMonth = YearMonth.from(today)
+            selectedDate = today
+        }
     }
 
     DisposableEffect(selectedDate) {
@@ -158,6 +193,17 @@ internal fun DailyProgressScreen(
         listOf(displayedMonth.minusMonths(1), displayedMonth.plusMonths(1)).forEach { neighbour ->
             if (!completedByMonth.containsKey(neighbour)) load(neighbour)
         }
+        repository.loadNotes(
+            displayedMonth.minusMonths(1).atDay(1),
+            displayedMonth.plusMonths(1).atEndOfMonth()
+        ) { result ->
+            if (screenActive.get()) result.onSuccess { loaded ->
+                val from = displayedMonth.minusMonths(1).atDay(1)
+                val to = displayedMonth.plusMonths(1).atEndOfMonth()
+                notesByDate.keys.removeAll { it >= from && it <= to }
+                notesByDate.putAll(loaded)
+            }
+        }
         // Keep the cache small.
         completedByMonth.keys.removeAll {
             kotlin.math.abs(java.time.temporal.ChronoUnit.MONTHS.between(it, displayedMonth)) > 3
@@ -166,8 +212,13 @@ internal fun DailyProgressScreen(
 
     LaunchedEffect(cloudDataRevision) {
         if (cloudDataRevision > 0) {
+            // A sync result must never replace what is on screen while an edit is being saved:
+            // that made the text jump back to an older version.
+            val revisionAtRequest = saveRevision
             repository.loadEntry(selectedDate) { result ->
-                if (screenActive.get()) result.onSuccess { selectedEntry = it }
+                if (screenActive.get() && saveRevision == revisionAtRequest && !repository.hasPendingSave()) {
+                    result.onSuccess { selectedEntry = it }
+                }
             }
             listOf(displayedMonth, displayedMonth.minusMonths(1), displayedMonth.plusMonths(1)).forEach { month ->
                 repository.loadCompletedDates(month) { result ->
@@ -196,7 +247,8 @@ internal fun DailyProgressScreen(
                 saveState = if (result.isSuccess) SaveState.SAVED else SaveState.FAILED
             }
             if (result.isSuccess && cloudAccountId != null) {
-                repository.syncCloud(cloud, cloudAccountId, onCloudSyncResult)
+                // Collapsed into one sync a few seconds later instead of one per keystroke pause.
+                repository.syncCloudSoon(cloud, cloudAccountId, onCloudSyncResult)
             }
             if (result.isSuccess) {
                 val month = YearMonth.from(updatedEntry.date)
@@ -247,6 +299,7 @@ internal fun DailyProgressScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
+                    .imePadding()
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp)
             ) {
@@ -266,21 +319,18 @@ internal fun DailyProgressScreen(
                     today = today,
                     completedFor = { completedByMonth[it] ?: emptySet() },
                     locale = locale,
-                    onPreviousMonth = {
-                        haptics.select()
-                        val target = displayedMonth.minusMonths(1)
-                        displayedMonth = target
-                        selectedDate = target.atDay(
-                            selectedDate.dayOfMonth.coerceAtMost(target.lengthOfMonth())
-                        )
+                    notes = notesByDate,
+                    onLongPressDate = { date ->
+                        haptics.heavy()
+                        noteEditorDate = date
                     },
-                    onNextMonth = {
-                        haptics.select()
-                        val target = displayedMonth.plusMonths(1)
-                        displayedMonth = target
-                        selectedDate = target.atDay(
-                            selectedDate.dayOfMonth.coerceAtMost(target.lengthOfMonth())
-                        )
+                    onMonthChange = { target ->
+                        if (target != displayedMonth) {
+                            haptics.select()
+                            displayedMonth = target
+                            // Land on today (current month) or the 1st, never on a random future day.
+                            selectedDate = if (target == YearMonth.from(today)) today else target.atDay(1)
+                        }
                     },
                     onSelectDate = {
                         if (it != selectedDate) haptics.select()
@@ -327,6 +377,11 @@ internal fun DailyProgressScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
+                notesByDate[selectedDate]?.let { note ->
+                    Spacer(Modifier.height(12.dp))
+                    NoteCard(note = note, onEdit = { noteEditorDate = selectedDate })
+                }
+
                 Spacer(Modifier.height(16.dp))
 
                 val panelDate = loadedDate ?: selectedDate
@@ -353,6 +408,7 @@ internal fun DailyProgressScreen(
                                 description = ""
                             ),
                             saveState = saveState,
+                            signedIn = cloudAccountId != null,
                             onEntryChange = ::save
                         )
                     }
@@ -362,6 +418,34 @@ internal fun DailyProgressScreen(
                 Spacer(Modifier.navigationBarsPadding().height(120.dp))
             }
         }
+    }
+
+    noteEditorDate?.let { date ->
+        NoteEditorDialog(
+            date = date,
+            dateLabel = date.format(selectedDateFormatter),
+            relative = run {
+                val days = java.time.temporal.ChronoUnit.DAYS.between(today, date)
+                when {
+                    days == 0L -> "Today"
+                    days == 1L -> "Tomorrow"
+                    days == -1L -> "Yesterday"
+                    days > 1L -> "In $days days"
+                    else -> "${-days} days ago"
+                }
+            },
+            existing = notesByDate[date],
+            onDismiss = { noteEditorDate = null },
+            onSave = { text ->
+                noteEditorDate = null
+                repository.saveNote(date, text) { result ->
+                    result.onSuccess {
+                        val trimmed = text.trim()
+                        if (trimmed.isEmpty()) notesByDate.remove(date) else notesByDate[date] = trimmed
+                    }
+                }
+            }
+        )
     }
 }
 
@@ -474,8 +558,9 @@ private fun MonthCalendar(
     today: LocalDate,
     completedFor: (YearMonth) -> Set<LocalDate>,
     locale: Locale,
-    onPreviousMonth: () -> Unit,
-    onNextMonth: () -> Unit,
+    notes: Map<LocalDate, String>,
+    onLongPressDate: (LocalDate) -> Unit,
+    onMonthChange: (YearMonth) -> Unit,
     onSelectDate: (LocalDate) -> Unit
 ) {
     val firstDayOfWeek = WeekFields.of(locale).firstDayOfWeek
@@ -488,10 +573,40 @@ private fun MonthCalendar(
     }
     val labelFormatter = remember(locale) { DateTimeFormatter.ofPattern("MMMM yyyy", locale) }
 
+    // Months are pages of a pager: the neighbouring months sit next to the current one and move
+    // with the finger, and they are prepared in advance, so a swipe never has to build a grid.
+    val anchor = remember { YearMonth.of(2000, 1) }
+    fun pageOf(target: YearMonth): Int =
+        java.time.temporal.ChronoUnit.MONTHS.between(anchor, target).toInt()
+    val pagerState = rememberPagerState(initialPage = pageOf(month)) { 12 * 400 }
+    val latestMonth by rememberUpdatedState(month)
+    val latestOnMonthChange by rememberUpdatedState(onMonthChange)
+
+    // Swipe finished on a new month: tell the screen.
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            val settled = anchor.plusMonths(page.toLong())
+            if (settled != latestMonth) latestOnMonthChange(settled)
+        }
+    }
+    // The screen changed the month (arrow buttons, midnight, restore): move the pager to it.
+    LaunchedEffect(month) {
+        val target = pageOf(month)
+        if (pagerState.currentPage != target) {
+            if (kotlin.math.abs(pagerState.currentPage - target) == 1) {
+                pagerState.animateScrollToPage(target)
+            } else {
+                pagerState.scrollToPage(target)
+            }
+        }
+    }
+    // The title changes as soon as the swipe passes the middle.
+    val shownMonth = anchor.plusMonths(pagerState.currentPage.toLong())
+
     Column(Modifier.glassCard().padding(18.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             AnimatedContent(
-                targetState = month,
+                targetState = shownMonth,
                 modifier = Modifier.weight(1f),
                 transitionSpec = {
                     val direction = if (targetState > initialState) 1 else -1
@@ -506,9 +621,9 @@ private fun MonthCalendar(
                     style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Light)
                 )
             }
-            NavChevron(forward = false, description = "Previous month", onClick = onPreviousMonth)
+            NavChevron(forward = false, description = "Previous month", onClick = { onMonthChange(month.minusMonths(1)) })
             Spacer(Modifier.width(8.dp))
-            NavChevron(forward = true, description = "Next month", onClick = onNextMonth)
+            NavChevron(forward = true, description = "Next month", onClick = { onMonthChange(month.plusMonths(1)) })
         }
 
         Spacer(Modifier.height(16.dp))
@@ -526,33 +641,24 @@ private fun MonthCalendar(
         }
         Spacer(Modifier.height(8.dp))
 
-        // Render one 42-cell grid at a time. Keeping outgoing and incoming grids alive
-        // during AnimatedContent doubled the calendar's composition and drawing work.
-        val completed = completedFor(month)
-        val days = remember(month, locale) {
-            val built = buildCalendarDays(month, firstDayOfWeek)
-            built + List((42 - built.size).coerceAtLeast(0)) { null }
-        }
-        Column(Modifier.fillMaxWidth()) {
-            days.chunked(7).forEach { week ->
-                Row(Modifier.fillMaxWidth()) {
-                    week.forEach { date ->
-                        if (date == null) {
-                            Spacer(Modifier.weight(1f).aspectRatio(1f).padding(2.dp))
-                        } else {
-                            CalendarDayCell(
-                                date = date,
-                                isToday = date == today,
-                                isSelected = date == selectedDate,
-                                isCompleted = date in completed,
-                                isFuture = date.isAfter(today),
-                                onClick = { onSelectDate(date) },
-                                modifier = Modifier.weight(1f).aspectRatio(1f).padding(2.dp)
-                            )
-                        }
-                    }
-                }
-            }
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxWidth(),
+            beyondViewportPageCount = 1,
+            key = { it }
+        ) { page ->
+            val pageMonth = anchor.plusMonths(page.toLong())
+            MonthGrid(
+                month = pageMonth,
+                firstDayOfWeek = firstDayOfWeek,
+                locale = locale,
+                completed = completedFor(pageMonth),
+                notes = notes,
+                selectedDate = selectedDate,
+                today = today,
+                onSelectDate = onSelectDate,
+                onLongPressDate = onLongPressDate
+            )
         }
 
         Spacer(Modifier.height(14.dp))
@@ -562,8 +668,51 @@ private fun MonthCalendar(
             horizontalArrangement = Arrangement.spacedBy(20.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            LegendItem(MaterialTheme.colorScheme.primary, "Completed")
+            LegendCheck(MaterialTheme.colorScheme.primary, "Completed")
             LegendItem(MaterialTheme.colorScheme.onSurface, "Today", outlined = true)
+            LegendItem(NoteColor, "Note")
+        }
+    }
+}
+
+/** One month as a 6-week grid. Always 42 cells tall, so every page has the same height. */
+@Composable
+private fun MonthGrid(
+    month: YearMonth,
+    firstDayOfWeek: DayOfWeek,
+    locale: Locale,
+    completed: Set<LocalDate>,
+    notes: Map<LocalDate, String>,
+    selectedDate: LocalDate,
+    today: LocalDate,
+    onSelectDate: (LocalDate) -> Unit,
+    onLongPressDate: (LocalDate) -> Unit
+) {
+    val days = remember(month, locale) {
+        val built = buildCalendarDays(month, firstDayOfWeek)
+        built + List((42 - built.size).coerceAtLeast(0)) { null }
+    }
+    Column(Modifier.fillMaxWidth()) {
+        days.chunked(7).forEach { week ->
+            Row(Modifier.fillMaxWidth()) {
+                week.forEach { date ->
+                    if (date == null) {
+                        Spacer(Modifier.weight(1f).aspectRatio(1f).padding(2.dp))
+                    } else {
+                        CalendarDayCell(
+                            date = date,
+                            isToday = date == today,
+                            isSelected = date == selectedDate,
+                            isCompleted = date in completed,
+                            isFuture = date.isAfter(today),
+                            hasNote = date in notes,
+                            onClick = { onSelectDate(date) },
+                            onLongClick = { onLongPressDate(date) },
+                            modifier = Modifier.weight(1f).aspectRatio(1f).padding(2.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -604,6 +753,7 @@ private fun NavChevron(forward: Boolean, description: String, onClick: () -> Uni
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CalendarDayCell(
     date: LocalDate,
@@ -611,7 +761,9 @@ private fun CalendarDayCell(
     isSelected: Boolean,
     isCompleted: Boolean,
     isFuture: Boolean,
+    hasNote: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -623,7 +775,12 @@ private fun CalendarDayCell(
         label = "day-selection"
     )
     val primary = scheme.primary
-    val restingFill = primary.copy(alpha = if (isCompleted) 0.16f else 0f)
+    // Completed days get the light green tint; days with a note get a warm tint of their own.
+    val restingFill = when {
+        isCompleted -> primary.copy(alpha = 0.16f)
+        hasNote -> NoteColor.copy(alpha = 0.20f)
+        else -> Color.Transparent
+    }
     val restingText = if (isFuture) scheme.onSurfaceVariant.copy(alpha = 0.4f) else scheme.onSurface
     val textColor = lerp(restingText, scheme.onPrimary, selection.coerceIn(0f, 1f))
     val markerColor = if (isCompleted) lerp(primary, scheme.onPrimary, selection.coerceIn(0f, 1f)) else Color.Transparent
@@ -643,6 +800,14 @@ private fun CalendarDayCell(
                         drawCircle(primary.copy(alpha = 0.22f * t), radius = size.minDimension / 2f * (1f + 0.22f * t))
                     }
                     drawCircle(lerp(restingFill, primary, t))
+                    // A completed day that also has a note keeps its green tint plus a warm ring.
+                    if (hasNote && isCompleted) {
+                        drawCircle(
+                            NoteColor.copy(alpha = 0.75f * (1f - t)),
+                            radius = size.minDimension / 2f - 0.5.dp.toPx(),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(1.5.dp.toPx())
+                        )
+                    }
                     if (isToday) {
                         drawCircle(
                             primary.copy(alpha = 1f - t),
@@ -662,11 +827,28 @@ private fun CalendarDayCell(
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = if (isToday || isSelected) FontWeight.SemiBold else FontWeight.Normal
             )
-            Spacer(
-                Modifier.padding(top = 2.dp).size(4.dp).clip(CircleShape).background(markerColor)
-            )
+            // A small check mark replaces the old dot. The slot keeps its size when empty, so the
+            // day numbers never shift.
+            Canvas(Modifier.padding(top = 1.dp).size(width = 10.dp, height = 8.dp)) {
+                if (isCompleted) {
+                    val w = size.width
+                    val h = size.height
+                    val tick = Path().apply {
+                        moveTo(w * 0.08f, h * 0.55f)
+                        lineTo(w * 0.38f, h * 0.88f)
+                        lineTo(w * 0.94f, h * 0.10f)
+                    }
+                    drawPath(
+                        tick, markerColor,
+                        style = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    )
+                }
+            }
         }
-        Box(Modifier.matchParentSize().clip(CircleShape).clickable(onClick = onClick))
+        Box(
+            Modifier.matchParentSize().clip(CircleShape)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+        )
     }
 }
 
@@ -696,6 +878,30 @@ private fun LegendItem(
     }
 }
 
+@Composable
+private fun LegendCheck(color: Color, label: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp)
+    ) {
+        Canvas(Modifier.size(width = 11.dp, height = 9.dp)) {
+            val w = size.width
+            val h = size.height
+            val tick = Path().apply {
+                moveTo(w * 0.08f, h * 0.55f)
+                lineTo(w * 0.38f, h * 0.88f)
+                lineTo(w * 0.94f, h * 0.10f)
+            }
+            drawPath(tick, color, style = Stroke(1.7.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Day panels
 // ---------------------------------------------------------------------------------------------
@@ -704,6 +910,7 @@ private fun LegendItem(
 private fun TodayEditor(
     entry: DailyEntry,
     saveState: SaveState,
+    signedIn: Boolean,
     onEntryChange: (DailyEntry) -> Unit
 ) {
     Column(Modifier.glassCard().animateContentSize().padding(18.dp)) {
@@ -728,31 +935,55 @@ private fun TodayEditor(
         SaveIndicator(saveState)
         Spacer(Modifier.height(2.dp))
         Text(
-            text = "Cloud sync is not configured yet.",
+            text = if (signedIn) "Synced to your account automatically."
+            else "Sign in from the account button to back up and sync.",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
         )
     }
 }
 
-/** Large circular toggle: ring fills, the check mark draws itself, and a small burst fires on completion. */
+/**
+ * Large circular toggle with a Material 3 Expressive feel: the fill springs in with a bouncy
+ * overshoot while its edge briefly wobbles like a scalloped cookie and settles into a circle, and
+ * the check mark draws itself in right after. Un-checking simply shrinks the fill away.
+ * Everything is driven by springs and read only while drawing, so tapping never recomposes.
+ */
 @Composable
 private fun CompletionToggle(completed: Boolean, onChange: (Boolean) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     val haptics = rememberHaptics()
-    val check = remember { Animatable(if (completed) 1f else 0f) }
-    val burst = remember { Animatable(1f) } // 1f = finished, nothing visible
-    var previous by remember { mutableStateOf(completed) }
+    val fill = remember { Animatable(if (completed) 1f else 0f) }
+    val wobble = remember { Animatable(0f) }
+    val tick = remember { Animatable(if (completed) 1f else 0f) }
+    var first by remember { mutableStateOf(true) }
 
     LaunchedEffect(completed) {
-        check.animateTo(if (completed) 1f else 0f, tween(if (completed) 380 else 200))
-    }
-    LaunchedEffect(completed) {
-        if (completed && !previous) {
-            burst.snapTo(0f)
-            burst.animateTo(1f, tween(750, easing = FastOutSlowInEasing))
+        if (first) {
+            // First composition: show the current state without animating.
+            first = false
+            fill.snapTo(if (completed) 1f else 0f)
+            tick.snapTo(if (completed) 1f else 0f)
+            return@LaunchedEffect
         }
-        previous = completed
+        if (completed) {
+            launch {
+                fill.animateTo(1f, spring(dampingRatio = 0.55f, stiffness = 100f))
+            }
+            launch {
+                wobble.snapTo(1f)
+                wobble.animateTo(0f, spring(dampingRatio = 0.45f, stiffness = 55f))
+            }
+            launch {
+                tick.snapTo(0f)
+                delay(220)
+                tick.animateTo(1f, spring(dampingRatio = 0.8f, stiffness = 120f))
+            }
+        } else {
+            launch { tick.animateTo(0f, tween(220)) }
+            launch { fill.animateTo(0f, spring(dampingRatio = 1f, stiffness = 260f)) }
+            wobble.snapTo(0f)
+        }
     }
 
     Row(
@@ -770,48 +1001,49 @@ private fun CompletionToggle(completed: Boolean, onChange: (Boolean) -> Unit) {
         Box(Modifier.size(64.dp)) {
             Canvas(Modifier.fillMaxSize()) {
                 val c = center
-                val r = 21.dp.toPx()
-                val fillAmount = check.value
+                val baseRadius = 21.dp.toPx()
+                val f = fill.value
+                val w = wobble.value
 
-                drawCircle(Color.White.copy(alpha = 0.16f), r, c, style = Stroke(1.5.dp.toPx()))
-                if (fillAmount > 0f) drawCircle(scheme.primary, r * fillAmount, c)
+                // Empty ring, fading out as the fill grows over it.
+                drawCircle(
+                    Color.White.copy(alpha = 0.16f * (1f - f.coerceIn(0f, 1f))),
+                    baseRadius, c, style = Stroke(1.5.dp.toPx())
+                )
 
-                val t = ((fillAmount - 0.35f) / 0.65f).coerceIn(0f, 1f)
+                if (f > 0.001f) {
+                    // Scalloped edge: 8 soft bumps whose size follows the wobble spring.
+                    val radius = baseRadius * f
+                    val amplitude = 0.13f * w
+                    val spin = (1f - w) * 0.9f
+                    val shape = Path()
+                    val steps = 72
+                    for (i in 0..steps) {
+                        val angle = 2.0 * Math.PI * i / steps
+                        val r = radius * (1f + amplitude * kotlin.math.cos(8.0 * angle + spin).toFloat())
+                        val x = c.x + kotlin.math.cos(angle).toFloat() * r
+                        val y = c.y + kotlin.math.sin(angle).toFloat() * r
+                        if (i == 0) shape.moveTo(x, y) else shape.lineTo(x, y)
+                    }
+                    shape.close()
+                    drawPath(shape, scheme.primary)
+                }
+
+                val t = tick.value.coerceIn(0f, 1f)
                 if (t > 0f) {
-                    val tick = Path().apply {
+                    val check = Path().apply {
                         moveTo(c.x - 8.dp.toPx(), c.y + 0.5.dp.toPx())
                         lineTo(c.x - 2.5.dp.toPx(), c.y + 6.dp.toPx())
                         lineTo(c.x + 8.5.dp.toPx(), c.y - 6.dp.toPx())
                     }
                     val measure = PathMeasure()
-                    measure.setPath(tick, false)
+                    measure.setPath(check, false)
                     val partial = Path()
                     measure.getSegment(0f, measure.length * t, partial, true)
                     drawPath(
                         partial, scheme.onPrimary,
                         style = Stroke(2.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
                     )
-                }
-
-                val b = burst.value
-                if (b < 1f) {
-                    val fade = 1f - b
-                    drawCircle(
-                        scheme.primary.copy(alpha = 0.55f * fade),
-                        r + 14.dp.toPx() * b, c, style = Stroke(2.dp.toPx())
-                    )
-                    for (i in 0 until 10) {
-                        val angle = Math.toRadians(i * 36.0 + 18.0)
-                        val dist = r + 4.dp.toPx() + 14.dp.toPx() * b
-                        drawCircle(
-                            scheme.primary.copy(alpha = fade),
-                            2.4.dp.toPx() * fade,
-                            Offset(
-                                c.x + kotlin.math.cos(angle).toFloat() * dist,
-                                c.y + kotlin.math.sin(angle).toFloat() * dist
-                            )
-                        )
-                    }
                 }
             }
         }
@@ -837,6 +1069,8 @@ private fun CompletionToggle(completed: Boolean, onChange: (Boolean) -> Unit) {
 private fun DescriptionField(value: String, onValueChange: (String) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     var focused by remember { mutableStateOf(false) }
+    val bringIntoView = remember { BringIntoViewRequester() }
+    val scope = rememberCoroutineScope()
     val shape = RoundedCornerShape(18.dp)
     val borderColor by animateColorAsState(
         targetValue = if (focused) scheme.primary else Color.White.copy(alpha = 0.12f),
@@ -853,6 +1087,7 @@ private fun DescriptionField(value: String, onValueChange: (String) -> Unit) {
     Column {
         Box(
             Modifier.fillMaxWidth().heightIn(min = 168.dp)
+                .bringIntoViewRequester(bringIntoView)
                 .clip(shape)
                 .background(Color.Black.copy(alpha = 0.18f))
                 .border(1.dp, borderColor, shape)
@@ -861,7 +1096,16 @@ private fun DescriptionField(value: String, onValueChange: (String) -> Unit) {
             BasicTextField(
                 value = value,
                 onValueChange = { if (it.length <= MAX_DESCRIPTION_LENGTH) onValueChange(it) },
-                modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused },
+                modifier = Modifier.fillMaxWidth().onFocusChanged {
+                    focused = it.isFocused
+                    if (it.isFocused) {
+                        // Wait for the keyboard to finish opening, then scroll the box above it.
+                        scope.launch {
+                            delay(280)
+                            bringIntoView.bringIntoView()
+                        }
+                    }
+                },
                 textStyle = TextStyle(color = scheme.onSurface, fontSize = 15.sp, lineHeight = 22.sp),
                 cursorBrush = SolidColor(scheme.primary),
                 decorationBox = { inner ->
@@ -1008,6 +1252,175 @@ private fun InfoPanel(title: String, description: String) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+    }
+}
+
+@Composable
+private fun NoteCard(note: String, onEdit: () -> Unit) {
+    val source = rememberPressSource()
+    val shape = RoundedCornerShape(20.dp)
+    Column(
+        Modifier.fillMaxWidth().pressScale(source, 0.98f).clip(shape)
+            .background(NoteColor.copy(alpha = 0.10f))
+            .border(1.dp, NoteColor.copy(alpha = 0.35f), shape)
+            .hapticClickable(source, onClick = onEdit)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+    ) {
+        Text(
+            text = "NOTE \u00b7 TAP TO EDIT",
+            color = NoteColor,
+            style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.6.sp)
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = note,
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+}
+
+/**
+ * Opens on long-press of a date. A rounded dark card in the app's style: the date and how far away
+ * it is, a roomy text box that opens with the keyboard ready, and clear Save / Cancel / Remove
+ * actions. Saving empty text, or pressing Remove, deletes the note.
+ */
+@Composable
+private fun NoteEditorDialog(
+    date: LocalDate,
+    dateLabel: String,
+    relative: String,
+    existing: String?,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    val scheme = MaterialTheme.colorScheme
+    var text by remember(date) { mutableStateOf(existing.orEmpty()) }
+    var focused by remember { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
+    val cardShape = RoundedCornerShape(32.dp)
+    val fieldShape = RoundedCornerShape(20.dp)
+    val borderColor by animateColorAsState(
+        targetValue = if (focused) NoteColor else Color.White.copy(alpha = 0.12f),
+        animationSpec = tween(200),
+        label = "note-field-border"
+    )
+    val canSave = text.isNotBlank()
+
+    LaunchedEffect(Unit) {
+        delay(150)
+        runCatching { focusRequester.requestFocus() }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Column(
+            Modifier.padding(horizontal = 20.dp).fillMaxWidth().widthIn(max = 420.dp)
+                .clip(cardShape)
+                .background(Brush.verticalGradient(listOf(Color(0xFF1F2B22), Color(0xFF151C17))))
+                .border(1.dp, Color.White.copy(alpha = 0.10f), cardShape)
+                .padding(22.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(36.dp).clip(CircleShape).background(NoteColor.copy(alpha = 0.18f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(Modifier.size(10.dp).clip(CircleShape).background(NoteColor))
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (existing == null) "NEW NOTE" else "EDIT NOTE",
+                        color = NoteColor,
+                        style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.8.sp)
+                    )
+                    Text(
+                        relative,
+                        color = scheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Text(
+                dateLabel,
+                color = scheme.onBackground,
+                style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Light, letterSpacing = (-0.3).sp)
+            )
+            Spacer(Modifier.height(16.dp))
+
+            Box(
+                Modifier.fillMaxWidth().heightIn(min = 112.dp)
+                    .clip(fieldShape)
+                    .background(Color.Black.copy(alpha = 0.22f))
+                    .border(1.dp, borderColor, fieldShape)
+                    .padding(16.dp)
+            ) {
+                BasicTextField(
+                    value = text,
+                    onValueChange = { if (it.length <= MAX_NOTE_LENGTH) text = it },
+                    modifier = Modifier.fillMaxWidth()
+                        .focusRequester(focusRequester)
+                        .onFocusChanged { focused = it.isFocused },
+                    textStyle = TextStyle(color = scheme.onSurface, fontSize = 16.sp, lineHeight = 23.sp),
+                    cursorBrush = SolidColor(NoteColor),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.Sentences
+                    ),
+                    decorationBox = { inner ->
+                        Box {
+                            if (text.isEmpty()) {
+                                Text(
+                                    "e.g. Revise chemistry notes",
+                                    color = scheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                    style = TextStyle(fontSize = 16.sp, lineHeight = 23.sp)
+                                )
+                            }
+                            inner()
+                        }
+                    }
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "${text.length} / $MAX_NOTE_LENGTH",
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.End,
+                color = if (text.length > MAX_NOTE_LENGTH * 9 / 10) scheme.error else scheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelSmall
+            )
+
+            Spacer(Modifier.height(18.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (existing != null) {
+                    TextButton(onClick = { onSave("") }) {
+                        Text("Remove", color = scheme.error, fontWeight = FontWeight.Medium)
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onDismiss) {
+                    Text("Cancel", color = scheme.onSurfaceVariant, fontWeight = FontWeight.Medium)
+                }
+                Spacer(Modifier.width(6.dp))
+                val saveSource = rememberPressSource()
+                Box(
+                    Modifier.pressScale(saveSource).clip(CircleShape)
+                        .background(if (canSave) NoteColor else NoteColor.copy(alpha = 0.25f))
+                        .hapticClickable(saveSource, enabled = canSave, haptic = { confirm() }) { onSave(text) }
+                        .padding(horizontal = 26.dp, vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "Save",
+                        color = Color(0xFF2A2108),
+                        style = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    )
+                }
+            }
+        }
     }
 }
 
