@@ -188,9 +188,9 @@ internal fun ReminderScreen(onBack: () -> Unit) {
             initialMinute = minute,
             is24Hour = android.text.format.DateFormat.is24HourFormat(context)
         )
-        // A short tick each time the hour, the minute or AM/PM changes, for notifications and alarms.
+        // A short tick each time the hour or minute changes (AM/PM included, it moves the hour by 12).
         LaunchedEffect(timeState) {
-            snapshotFlow { Triple(timeState.hour, timeState.minute, timeState.isAfternoon) }
+            snapshotFlow { timeState.hour * 60 + timeState.minute }
                 .drop(1)
                 .collect { haptics.tick() }
         }
