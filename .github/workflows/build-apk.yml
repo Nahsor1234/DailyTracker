@@ -83,6 +83,9 @@ jobs:
           fi
           echo "Permanent signing keystore fingerprint verified."
 
+      - name: Run unit tests
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+
       - name: Build debug APK
         run: ./gradlew --no-daemon :app:assembleDebug
 

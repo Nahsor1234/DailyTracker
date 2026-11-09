@@ -41,6 +41,11 @@ internal class TimerAlertSettings(context: Context) {
             prefs.edit().apply { if (value == null) remove(KEY_RINGTONE) else putString(KEY_RINGTONE, value) }.apply()
         }
 
+    /** Keeps the screen awake while the countdown screen is open. Off by default. */
+    var keepScreenOn: Boolean
+        get() = prefs.getBoolean(KEY_KEEP_AWAKE, false)
+        set(value) { prefs.edit().putBoolean(KEY_KEEP_AWAKE, value).apply() }
+
     var notificationPermissionAsked: Boolean
         get() = prefs.getBoolean(KEY_ASKED, false)
         set(value) { prefs.edit().putBoolean(KEY_ASKED, value).apply() }
@@ -55,6 +60,7 @@ internal class TimerAlertSettings(context: Context) {
         const val KEY_VIBRATION = "vibration"
         const val KEY_RINGTONE = "ringtone"
         const val KEY_ASKED = "notification_permission_asked"
+        const val KEY_KEEP_AWAKE = "keep_screen_on"
     }
 }
 

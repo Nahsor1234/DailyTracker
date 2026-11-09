@@ -452,6 +452,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
     val alertSettings = remember { TimerAlertSettings(context) }
     var soundOn by remember { mutableStateOf(alertSettings.soundEnabled) }
     var vibrationOn by remember { mutableStateOf(alertSettings.vibrationEnabled) }
+    var keepScreenOn by remember { mutableStateOf(alertSettings.keepScreenOn) }
     var ringtoneUri by remember { mutableStateOf(alertSettings.ringtoneUri) }
     var notificationsBlocked by remember { mutableStateOf(false) }
     val ringtoneTitle by produceState("Default alarm", ringtoneUri) {
@@ -473,6 +474,17 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted -> notificationsBlocked = !granted }
+
+    // "Keep screen on": only while the Timer screen is the one being shown, in Countdown mode and
+    // with the option switched on. The flag is released as soon as any of those stops being true
+    // (leaving the screen, switching to Stopwatch, switching the option off), so normal screen
+    // timeout applies everywhere else.
+    val hostView = androidx.compose.ui.platform.LocalView.current
+    val holdScreenAwake = keepScreenOn && active && mode == TimerMode.COUNTDOWN
+    DisposableEffect(holdScreenAwake, hostView) {
+        if (holdScreenAwake) hostView.keepScreenOn = true
+        onDispose { if (holdScreenAwake) hostView.keepScreenOn = false }
+    }
 
     // The screen stays composed while Progress is shown. All readings are derived from the
     // elapsed-realtime clock, so while hidden there is nothing to redraw at 20 Hz: a running
@@ -668,6 +680,7 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
                 TimerAlertsCard(
                     soundOn = soundOn,
                     vibrationOn = vibrationOn,
+                    keepScreenOn = keepScreenOn,
                     soundName = ringtoneTitle,
                     notificationsBlocked = notificationsBlocked,
                     onSoundChange = {
@@ -678,6 +691,11 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
                     onVibrationChange = {
                         vibrationOn = it
                         alertSettings.vibrationEnabled = it
+                        haptics.toggle(it)
+                    },
+                    onKeepScreenOnChange = {
+                        keepScreenOn = it
+                        alertSettings.keepScreenOn = it
                         haptics.toggle(it)
                     },
                     onPickSound = {
@@ -710,10 +728,12 @@ internal fun TimerScreen(modifier: Modifier = Modifier, active: Boolean = true) 
 private fun TimerAlertsCard(
     soundOn: Boolean,
     vibrationOn: Boolean,
+    keepScreenOn: Boolean,
     soundName: String,
     notificationsBlocked: Boolean,
     onSoundChange: (Boolean) -> Unit,
     onVibrationChange: (Boolean) -> Unit,
+    onKeepScreenOnChange: (Boolean) -> Unit,
     onPickSound: () -> Unit,
     onTest: () -> Unit
 ) {
@@ -728,7 +748,7 @@ private fun TimerAlertsCard(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "WHEN TIME IS UP", color = colors.primary,
+                "COUNTDOWN OPTIONS", color = colors.primary,
                 style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.8.sp)
             )
             Spacer(Modifier.weight(1f))
@@ -755,6 +775,14 @@ private fun TimerAlertsCard(
             subtitle = if (vibrationOn) "On" else "Off",
             checked = vibrationOn,
             onCheckedChange = onVibrationChange,
+            onBodyClick = null
+        )
+        HorizontalDivider(color = Color.White.copy(alpha = 0.06f))
+        AlertToggleRow(
+            title = "Keep screen on",
+            subtitle = if (keepScreenOn) "Screen stays awake on this countdown screen" else "Off",
+            checked = keepScreenOn,
+            onCheckedChange = onKeepScreenOnChange,
             onBodyClick = null
         )
         if (notificationsBlocked) {

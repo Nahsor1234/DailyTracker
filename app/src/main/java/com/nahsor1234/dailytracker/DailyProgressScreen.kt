@@ -7,6 +7,7 @@ import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
@@ -28,7 +29,21 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.layout.onSizeChanged
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
@@ -77,6 +92,13 @@ import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 private const val MAX_DESCRIPTION_LENGTH = 5_000
+private const val MAX_NOTE_LENGTH = 500
+
+/** Dates with a note are tinted with this warm colour (completed days use the green primary). */
+private val NoteColor = Color(0xFFE8C77A)
+
+private val YearMonthSaver = Saver<YearMonth, String>(save = { it.toString() }, restore = { YearMonth.parse(it) })
+private val LocalDateSaver = Saver<LocalDate, String>(save = { it.toString() }, restore = { LocalDate.parse(it) })
 
 private enum class SaveState {
     IDLE,
@@ -97,8 +119,12 @@ internal fun DailyProgressScreen(
 ) {
     val locale = remember { Locale.getDefault() }
 
-    var displayedMonth by remember { mutableStateOf(YearMonth.from(today)) }
-    var selectedDate by remember { mutableStateOf(today) }
+    // Saved, so rotating the phone keeps the month and day you were looking at.
+    var displayedMonth by rememberSaveable(stateSaver = YearMonthSaver) { mutableStateOf(YearMonth.from(today)) }
+    var selectedDate by rememberSaveable(stateSaver = LocalDateSaver) { mutableStateOf(today) }
+    var knownToday by rememberSaveable(stateSaver = LocalDateSaver) { mutableStateOf(today) }
+    val notesByDate = remember { mutableStateMapOf<LocalDate, String>() }
+    var noteEditorDate by remember { mutableStateOf<LocalDate?>(null) }
     var selectedEntry by remember { mutableStateOf<DailyEntry?>(null) }
     // Completed days per month. The neighbouring months are kept cached, so changing month never
     // shows an empty calendar or month strip while the database answers.
@@ -118,9 +144,13 @@ internal fun DailyProgressScreen(
         onDispose { screenActive.set(false) }
     }
 
+    // Jump to the new day only when the date really changed (midnight), not on every recreation.
     LaunchedEffect(today) {
-        displayedMonth = YearMonth.from(today)
-        selectedDate = today
+        if (knownToday != today) {
+            knownToday = today
+            displayedMonth = YearMonth.from(today)
+            selectedDate = today
+        }
     }
 
     DisposableEffect(selectedDate) {
@@ -158,6 +188,17 @@ internal fun DailyProgressScreen(
         listOf(displayedMonth.minusMonths(1), displayedMonth.plusMonths(1)).forEach { neighbour ->
             if (!completedByMonth.containsKey(neighbour)) load(neighbour)
         }
+        repository.loadNotes(
+            displayedMonth.minusMonths(1).atDay(1),
+            displayedMonth.plusMonths(1).atEndOfMonth()
+        ) { result ->
+            if (screenActive.get()) result.onSuccess { loaded ->
+                val from = displayedMonth.minusMonths(1).atDay(1)
+                val to = displayedMonth.plusMonths(1).atEndOfMonth()
+                notesByDate.keys.removeAll { it >= from && it <= to }
+                notesByDate.putAll(loaded)
+            }
+        }
         // Keep the cache small.
         completedByMonth.keys.removeAll {
             kotlin.math.abs(java.time.temporal.ChronoUnit.MONTHS.between(it, displayedMonth)) > 3
@@ -166,8 +207,13 @@ internal fun DailyProgressScreen(
 
     LaunchedEffect(cloudDataRevision) {
         if (cloudDataRevision > 0) {
+            // A sync result must never replace what is on screen while an edit is being saved:
+            // that made the text jump back to an older version.
+            val revisionAtRequest = saveRevision
             repository.loadEntry(selectedDate) { result ->
-                if (screenActive.get()) result.onSuccess { selectedEntry = it }
+                if (screenActive.get() && saveRevision == revisionAtRequest && !repository.hasPendingSave()) {
+                    result.onSuccess { selectedEntry = it }
+                }
             }
             listOf(displayedMonth, displayedMonth.minusMonths(1), displayedMonth.plusMonths(1)).forEach { month ->
                 repository.loadCompletedDates(month) { result ->
@@ -196,7 +242,8 @@ internal fun DailyProgressScreen(
                 saveState = if (result.isSuccess) SaveState.SAVED else SaveState.FAILED
             }
             if (result.isSuccess && cloudAccountId != null) {
-                repository.syncCloud(cloud, cloudAccountId, onCloudSyncResult)
+                // Collapsed into one sync a few seconds later instead of one per keystroke pause.
+                repository.syncCloudSoon(cloud, cloudAccountId, onCloudSyncResult)
             }
             if (result.isSuccess) {
                 val month = YearMonth.from(updatedEntry.date)
@@ -247,6 +294,7 @@ internal fun DailyProgressScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
+                    .imePadding()
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 20.dp)
             ) {
@@ -266,21 +314,23 @@ internal fun DailyProgressScreen(
                     today = today,
                     completedFor = { completedByMonth[it] ?: emptySet() },
                     locale = locale,
+                    notes = notesByDate,
+                    onLongPressDate = { date ->
+                        haptics.heavy()
+                        noteEditorDate = date
+                    },
                     onPreviousMonth = {
                         haptics.select()
                         val target = displayedMonth.minusMonths(1)
                         displayedMonth = target
-                        selectedDate = target.atDay(
-                            selectedDate.dayOfMonth.coerceAtMost(target.lengthOfMonth())
-                        )
+                        // Land on today (current month) or the 1st, never on a random future day.
+                        selectedDate = if (target == YearMonth.from(today)) today else target.atDay(1)
                     },
                     onNextMonth = {
                         haptics.select()
                         val target = displayedMonth.plusMonths(1)
                         displayedMonth = target
-                        selectedDate = target.atDay(
-                            selectedDate.dayOfMonth.coerceAtMost(target.lengthOfMonth())
-                        )
+                        selectedDate = if (target == YearMonth.from(today)) today else target.atDay(1)
                     },
                     onSelectDate = {
                         if (it != selectedDate) haptics.select()
@@ -327,6 +377,11 @@ internal fun DailyProgressScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
+                notesByDate[selectedDate]?.let { note ->
+                    Spacer(Modifier.height(12.dp))
+                    NoteCard(note = note, onEdit = { noteEditorDate = selectedDate })
+                }
+
                 Spacer(Modifier.height(16.dp))
 
                 val panelDate = loadedDate ?: selectedDate
@@ -353,6 +408,7 @@ internal fun DailyProgressScreen(
                                 description = ""
                             ),
                             saveState = saveState,
+                            signedIn = cloudAccountId != null,
                             onEntryChange = ::save
                         )
                     }
@@ -362,6 +418,24 @@ internal fun DailyProgressScreen(
                 Spacer(Modifier.navigationBarsPadding().height(120.dp))
             }
         }
+    }
+
+    noteEditorDate?.let { date ->
+        NoteEditorDialog(
+            date = date,
+            dateLabel = date.format(selectedDateFormatter),
+            existing = notesByDate[date],
+            onDismiss = { noteEditorDate = null },
+            onSave = { text ->
+                noteEditorDate = null
+                repository.saveNote(date, text) { result ->
+                    result.onSuccess {
+                        val trimmed = text.trim()
+                        if (trimmed.isEmpty()) notesByDate.remove(date) else notesByDate[date] = trimmed
+                    }
+                }
+            }
+        )
     }
 }
 
@@ -474,6 +548,8 @@ private fun MonthCalendar(
     today: LocalDate,
     completedFor: (YearMonth) -> Set<LocalDate>,
     locale: Locale,
+    notes: Map<LocalDate, String>,
+    onLongPressDate: (LocalDate) -> Unit,
     onPreviousMonth: () -> Unit,
     onNextMonth: () -> Unit,
     onSelectDate: (LocalDate) -> Unit
@@ -533,7 +609,46 @@ private fun MonthCalendar(
             val built = buildCalendarDays(month, firstDayOfWeek)
             built + List((42 - built.size).coerceAtLeast(0)) { null }
         }
-        Column(Modifier.fillMaxWidth()) {
+        // Swipe left/right to change month. The grid follows the finger, then slides out and the
+        // next month slides in with a short spring. Only a graphicsLayer offset changes per frame,
+        // so nothing is recomposed while dragging.
+        var dragOffset by remember { mutableFloatStateOf(0f) }
+        var gridWidth by remember { mutableFloatStateOf(1f) }
+        val dragState = rememberDraggableState { delta -> dragOffset += delta }
+        Column(
+            Modifier.fillMaxWidth()
+                .onSizeChanged { gridWidth = it.width.toFloat().coerceAtLeast(1f) }
+                .graphicsLayer {
+                    translationX = dragOffset
+                    alpha = 1f - (kotlin.math.abs(dragOffset) / gridWidth).coerceIn(0f, 1f) * 0.7f
+                }
+                .draggable(
+                    state = dragState,
+                    orientation = Orientation.Horizontal,
+                    onDragStopped = { velocity ->
+                        val threshold = gridWidth * 0.22f
+                        val next = dragOffset < -threshold || velocity < -900f
+                        val previous = dragOffset > threshold || velocity > 900f
+                        if (next || previous) {
+                            val direction = if (next) -1f else 1f
+                            animate(dragOffset, direction * gridWidth * 0.6f, animationSpec = tween(110)) { v, _ ->
+                                dragOffset = v
+                            }
+                            if (next) onNextMonth() else onPreviousMonth()
+                            dragOffset = -direction * gridWidth * 0.35f
+                            animate(
+                                dragOffset, 0f,
+                                animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow)
+                            ) { v, _ -> dragOffset = v }
+                        } else {
+                            animate(
+                                dragOffset, 0f,
+                                animationSpec = spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMedium)
+                            ) { v, _ -> dragOffset = v }
+                        }
+                    }
+                )
+        ) {
             days.chunked(7).forEach { week ->
                 Row(Modifier.fillMaxWidth()) {
                     week.forEach { date ->
@@ -546,7 +661,9 @@ private fun MonthCalendar(
                                 isSelected = date == selectedDate,
                                 isCompleted = date in completed,
                                 isFuture = date.isAfter(today),
+                                hasNote = date in notes,
                                 onClick = { onSelectDate(date) },
+                                onLongClick = { onLongPressDate(date) },
                                 modifier = Modifier.weight(1f).aspectRatio(1f).padding(2.dp)
                             )
                         }
@@ -562,8 +679,9 @@ private fun MonthCalendar(
             horizontalArrangement = Arrangement.spacedBy(20.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            LegendItem(MaterialTheme.colorScheme.primary, "Completed")
+            LegendCheck(MaterialTheme.colorScheme.primary, "Completed")
             LegendItem(MaterialTheme.colorScheme.onSurface, "Today", outlined = true)
+            LegendItem(NoteColor, "Note")
         }
     }
 }
@@ -604,6 +722,7 @@ private fun NavChevron(forward: Boolean, description: String, onClick: () -> Uni
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CalendarDayCell(
     date: LocalDate,
@@ -611,7 +730,9 @@ private fun CalendarDayCell(
     isSelected: Boolean,
     isCompleted: Boolean,
     isFuture: Boolean,
+    hasNote: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -623,7 +744,12 @@ private fun CalendarDayCell(
         label = "day-selection"
     )
     val primary = scheme.primary
-    val restingFill = primary.copy(alpha = if (isCompleted) 0.16f else 0f)
+    // Completed days get the light green tint; days with a note get a warm tint of their own.
+    val restingFill = when {
+        isCompleted -> primary.copy(alpha = 0.16f)
+        hasNote -> NoteColor.copy(alpha = 0.20f)
+        else -> Color.Transparent
+    }
     val restingText = if (isFuture) scheme.onSurfaceVariant.copy(alpha = 0.4f) else scheme.onSurface
     val textColor = lerp(restingText, scheme.onPrimary, selection.coerceIn(0f, 1f))
     val markerColor = if (isCompleted) lerp(primary, scheme.onPrimary, selection.coerceIn(0f, 1f)) else Color.Transparent
@@ -643,6 +769,14 @@ private fun CalendarDayCell(
                         drawCircle(primary.copy(alpha = 0.22f * t), radius = size.minDimension / 2f * (1f + 0.22f * t))
                     }
                     drawCircle(lerp(restingFill, primary, t))
+                    // A completed day that also has a note keeps its green tint plus a warm ring.
+                    if (hasNote && isCompleted) {
+                        drawCircle(
+                            NoteColor.copy(alpha = 0.75f * (1f - t)),
+                            radius = size.minDimension / 2f - 0.5.dp.toPx(),
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(1.5.dp.toPx())
+                        )
+                    }
                     if (isToday) {
                         drawCircle(
                             primary.copy(alpha = 1f - t),
@@ -662,11 +796,28 @@ private fun CalendarDayCell(
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = if (isToday || isSelected) FontWeight.SemiBold else FontWeight.Normal
             )
-            Spacer(
-                Modifier.padding(top = 2.dp).size(4.dp).clip(CircleShape).background(markerColor)
-            )
+            // A small check mark replaces the old dot. The slot keeps its size when empty, so the
+            // day numbers never shift.
+            Canvas(Modifier.padding(top = 1.dp).size(width = 10.dp, height = 8.dp)) {
+                if (isCompleted) {
+                    val w = size.width
+                    val h = size.height
+                    val tick = Path().apply {
+                        moveTo(w * 0.08f, h * 0.55f)
+                        lineTo(w * 0.38f, h * 0.88f)
+                        lineTo(w * 0.94f, h * 0.10f)
+                    }
+                    drawPath(
+                        tick, markerColor,
+                        style = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    )
+                }
+            }
         }
-        Box(Modifier.matchParentSize().clip(CircleShape).clickable(onClick = onClick))
+        Box(
+            Modifier.matchParentSize().clip(CircleShape)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+        )
     }
 }
 
@@ -696,6 +847,30 @@ private fun LegendItem(
     }
 }
 
+@Composable
+private fun LegendCheck(color: Color, label: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp)
+    ) {
+        Canvas(Modifier.size(width = 11.dp, height = 9.dp)) {
+            val w = size.width
+            val h = size.height
+            val tick = Path().apply {
+                moveTo(w * 0.08f, h * 0.55f)
+                lineTo(w * 0.38f, h * 0.88f)
+                lineTo(w * 0.94f, h * 0.10f)
+            }
+            drawPath(tick, color, style = Stroke(1.7.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+        }
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Day panels
 // ---------------------------------------------------------------------------------------------
@@ -704,6 +879,7 @@ private fun LegendItem(
 private fun TodayEditor(
     entry: DailyEntry,
     saveState: SaveState,
+    signedIn: Boolean,
     onEntryChange: (DailyEntry) -> Unit
 ) {
     Column(Modifier.glassCard().animateContentSize().padding(18.dp)) {
@@ -728,31 +904,55 @@ private fun TodayEditor(
         SaveIndicator(saveState)
         Spacer(Modifier.height(2.dp))
         Text(
-            text = "Cloud sync is not configured yet.",
+            text = if (signedIn) "Synced to your account automatically."
+            else "Sign in from the account button to back up and sync.",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
         )
     }
 }
 
-/** Large circular toggle: ring fills, the check mark draws itself, and a small burst fires on completion. */
+/**
+ * Large circular toggle with a Material 3 Expressive feel: the fill springs in with a bouncy
+ * overshoot while its edge briefly wobbles like a scalloped cookie and settles into a circle, and
+ * the check mark draws itself in right after. Un-checking simply shrinks the fill away.
+ * Everything is driven by springs and read only while drawing, so tapping never recomposes.
+ */
 @Composable
 private fun CompletionToggle(completed: Boolean, onChange: (Boolean) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     val haptics = rememberHaptics()
-    val check = remember { Animatable(if (completed) 1f else 0f) }
-    val burst = remember { Animatable(1f) } // 1f = finished, nothing visible
-    var previous by remember { mutableStateOf(completed) }
+    val fill = remember { Animatable(if (completed) 1f else 0f) }
+    val wobble = remember { Animatable(0f) }
+    val tick = remember { Animatable(if (completed) 1f else 0f) }
+    var first by remember { mutableStateOf(true) }
 
     LaunchedEffect(completed) {
-        check.animateTo(if (completed) 1f else 0f, tween(if (completed) 380 else 200))
-    }
-    LaunchedEffect(completed) {
-        if (completed && !previous) {
-            burst.snapTo(0f)
-            burst.animateTo(1f, tween(750, easing = FastOutSlowInEasing))
+        if (first) {
+            // First composition: show the current state without animating.
+            first = false
+            fill.snapTo(if (completed) 1f else 0f)
+            tick.snapTo(if (completed) 1f else 0f)
+            return@LaunchedEffect
         }
-        previous = completed
+        if (completed) {
+            launch {
+                fill.animateTo(1f, spring(dampingRatio = 0.5f, stiffness = 420f))
+            }
+            launch {
+                wobble.snapTo(1f)
+                wobble.animateTo(0f, spring(dampingRatio = 0.42f, stiffness = 170f))
+            }
+            launch {
+                tick.snapTo(0f)
+                delay(90)
+                tick.animateTo(1f, spring(dampingRatio = 0.72f, stiffness = 380f))
+            }
+        } else {
+            launch { tick.animateTo(0f, tween(120)) }
+            launch { fill.animateTo(0f, spring(dampingRatio = 1f, stiffness = 700f)) }
+            wobble.snapTo(0f)
+        }
     }
 
     Row(
@@ -770,48 +970,49 @@ private fun CompletionToggle(completed: Boolean, onChange: (Boolean) -> Unit) {
         Box(Modifier.size(64.dp)) {
             Canvas(Modifier.fillMaxSize()) {
                 val c = center
-                val r = 21.dp.toPx()
-                val fillAmount = check.value
+                val baseRadius = 21.dp.toPx()
+                val f = fill.value
+                val w = wobble.value
 
-                drawCircle(Color.White.copy(alpha = 0.16f), r, c, style = Stroke(1.5.dp.toPx()))
-                if (fillAmount > 0f) drawCircle(scheme.primary, r * fillAmount, c)
+                // Empty ring, fading out as the fill grows over it.
+                drawCircle(
+                    Color.White.copy(alpha = 0.16f * (1f - f.coerceIn(0f, 1f))),
+                    baseRadius, c, style = Stroke(1.5.dp.toPx())
+                )
 
-                val t = ((fillAmount - 0.35f) / 0.65f).coerceIn(0f, 1f)
+                if (f > 0.001f) {
+                    // Scalloped edge: 8 soft bumps whose size follows the wobble spring.
+                    val radius = baseRadius * f
+                    val amplitude = 0.13f * w
+                    val spin = (1f - w) * 0.9f
+                    val shape = Path()
+                    val steps = 72
+                    for (i in 0..steps) {
+                        val angle = 2.0 * Math.PI * i / steps
+                        val r = radius * (1f + amplitude * kotlin.math.cos(8.0 * angle + spin).toFloat())
+                        val x = c.x + kotlin.math.cos(angle).toFloat() * r
+                        val y = c.y + kotlin.math.sin(angle).toFloat() * r
+                        if (i == 0) shape.moveTo(x, y) else shape.lineTo(x, y)
+                    }
+                    shape.close()
+                    drawPath(shape, scheme.primary)
+                }
+
+                val t = tick.value.coerceIn(0f, 1f)
                 if (t > 0f) {
-                    val tick = Path().apply {
+                    val check = Path().apply {
                         moveTo(c.x - 8.dp.toPx(), c.y + 0.5.dp.toPx())
                         lineTo(c.x - 2.5.dp.toPx(), c.y + 6.dp.toPx())
                         lineTo(c.x + 8.5.dp.toPx(), c.y - 6.dp.toPx())
                     }
                     val measure = PathMeasure()
-                    measure.setPath(tick, false)
+                    measure.setPath(check, false)
                     val partial = Path()
                     measure.getSegment(0f, measure.length * t, partial, true)
                     drawPath(
                         partial, scheme.onPrimary,
                         style = Stroke(2.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
                     )
-                }
-
-                val b = burst.value
-                if (b < 1f) {
-                    val fade = 1f - b
-                    drawCircle(
-                        scheme.primary.copy(alpha = 0.55f * fade),
-                        r + 14.dp.toPx() * b, c, style = Stroke(2.dp.toPx())
-                    )
-                    for (i in 0 until 10) {
-                        val angle = Math.toRadians(i * 36.0 + 18.0)
-                        val dist = r + 4.dp.toPx() + 14.dp.toPx() * b
-                        drawCircle(
-                            scheme.primary.copy(alpha = fade),
-                            2.4.dp.toPx() * fade,
-                            Offset(
-                                c.x + kotlin.math.cos(angle).toFloat() * dist,
-                                c.y + kotlin.math.sin(angle).toFloat() * dist
-                            )
-                        )
-                    }
                 }
             }
         }
@@ -837,6 +1038,8 @@ private fun CompletionToggle(completed: Boolean, onChange: (Boolean) -> Unit) {
 private fun DescriptionField(value: String, onValueChange: (String) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     var focused by remember { mutableStateOf(false) }
+    val bringIntoView = remember { BringIntoViewRequester() }
+    val scope = rememberCoroutineScope()
     val shape = RoundedCornerShape(18.dp)
     val borderColor by animateColorAsState(
         targetValue = if (focused) scheme.primary else Color.White.copy(alpha = 0.12f),
@@ -853,6 +1056,7 @@ private fun DescriptionField(value: String, onValueChange: (String) -> Unit) {
     Column {
         Box(
             Modifier.fillMaxWidth().heightIn(min = 168.dp)
+                .bringIntoViewRequester(bringIntoView)
                 .clip(shape)
                 .background(Color.Black.copy(alpha = 0.18f))
                 .border(1.dp, borderColor, shape)
@@ -861,7 +1065,16 @@ private fun DescriptionField(value: String, onValueChange: (String) -> Unit) {
             BasicTextField(
                 value = value,
                 onValueChange = { if (it.length <= MAX_DESCRIPTION_LENGTH) onValueChange(it) },
-                modifier = Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused },
+                modifier = Modifier.fillMaxWidth().onFocusChanged {
+                    focused = it.isFocused
+                    if (it.isFocused) {
+                        // Wait for the keyboard to finish opening, then scroll the box above it.
+                        scope.launch {
+                            delay(280)
+                            bringIntoView.bringIntoView()
+                        }
+                    }
+                },
                 textStyle = TextStyle(color = scheme.onSurface, fontSize = 15.sp, lineHeight = 22.sp),
                 cursorBrush = SolidColor(scheme.primary),
                 decorationBox = { inner ->
@@ -1009,6 +1222,79 @@ private fun InfoPanel(title: String, description: String) {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
+}
+
+@Composable
+private fun NoteCard(note: String, onEdit: () -> Unit) {
+    val source = rememberPressSource()
+    val shape = RoundedCornerShape(20.dp)
+    Column(
+        Modifier.fillMaxWidth().pressScale(source, 0.98f).clip(shape)
+            .background(NoteColor.copy(alpha = 0.10f))
+            .border(1.dp, NoteColor.copy(alpha = 0.35f), shape)
+            .hapticClickable(source, onClick = onEdit)
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+    ) {
+        Text(
+            text = "NOTE \u00b7 TAP TO EDIT",
+            color = NoteColor,
+            style = TextStyle(fontSize = 10.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.6.sp)
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = note,
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
+}
+
+/** Opens on long-press of a date. Saving empty text, or pressing Remove, deletes the note. */
+@Composable
+private fun NoteEditorDialog(
+    date: LocalDate,
+    dateLabel: String,
+    existing: String?,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    var text by remember(date) { mutableStateOf(existing.orEmpty()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (existing == null) "Add a note" else "Edit note") },
+        text = {
+            Column {
+                Text(
+                    dateLabel,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { if (it.length <= MAX_NOTE_LENGTH) text = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("e.g. Revise chemistry notes") },
+                    minLines = 2,
+                    maxLines = 5,
+                    supportingText = { Text("${text.length} / $MAX_NOTE_LENGTH") }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(text) }, enabled = text.isNotBlank()) { Text("Save") }
+        },
+        dismissButton = {
+            Row {
+                if (existing != null) {
+                    TextButton(onClick = { onSave("") }) {
+                        Text("Remove", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        }
+    )
 }
 
 private fun buildCalendarDays(

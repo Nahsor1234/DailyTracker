@@ -81,13 +81,13 @@ internal object AlarmLog {
     fun lastLateMs(context: Context): Long = prefs(context).getLong(KEY_LAST_LATE, -1L)
 }
 
-private fun notificationsOk(context: Context): Boolean = TimerAlerts.notificationsAllowed(context)
+internal fun notificationsOk(context: Context): Boolean = TimerAlerts.notificationsAllowed(context)
 
-private fun exactOk(context: Context): Boolean =
+internal fun exactOk(context: Context): Boolean =
     Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
         context.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
 
-private fun batteryOk(context: Context): Boolean =
+internal fun batteryOk(context: Context): Boolean =
     context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
 
 /**

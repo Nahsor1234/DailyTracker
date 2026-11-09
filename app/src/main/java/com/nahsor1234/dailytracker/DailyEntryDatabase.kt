@@ -11,6 +11,7 @@ import java.time.YearMonth
 import java.time.ZoneId
 import java.util.concurrent.Executors
 import java.util.concurrent.FutureTask
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Records are keyed by the user's local calendar date (yyyy-MM-dd).
@@ -33,6 +34,36 @@ internal class DailyEntryRepository(context: Context) {
         Thread(task, "dailytracker-cloud-sync").apply { isDaemon = true }
     }
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val syncRunning = AtomicBoolean(false)
+    private val syncRerun = AtomicBoolean(false)
+    private var queuedSync: Triple<DailyTrackerCloud, String, (Result<Int>) -> Unit>? = null
+    private val queuedSyncRunnable = Runnable { flushQueuedSync() }
+
+    /** True while a typed edit is still waiting for its debounced write. Main thread only. */
+    fun hasPendingSave(): Boolean = pendingEntry != null
+
+    /**
+     * Asks for a sync a few seconds from now instead of right away, so typing does not start a
+     * network round trip after every pause. Repeated calls collapse into one. Main thread only.
+     */
+    fun syncCloudSoon(
+        cloud: DailyTrackerCloud,
+        accountId: String,
+        onResult: (Result<Int>) -> Unit
+    ) {
+        queuedSync = Triple(cloud, accountId, onResult)
+        mainHandler.removeCallbacks(queuedSyncRunnable)
+        mainHandler.postDelayed(queuedSyncRunnable, SYNC_DELAY_MS)
+    }
+
+    /** Runs a waiting [syncCloudSoon] now (used when the app goes to the background). */
+    fun flushQueuedSync() {
+        mainHandler.removeCallbacks(queuedSyncRunnable)
+        val queued = queuedSync ?: return
+        queuedSync = null
+        syncCloud(queued.first, queued.second, queued.third)
+    }
 
     fun loadEntry(date: LocalDate, onResult: (Result<DailyEntry?>) -> Unit) {
         executor.execute {
@@ -123,18 +154,31 @@ internal class DailyEntryRepository(context: Context) {
         pendingCallback = null
         executor.execute {
             val result = runCatching {
-                require(entry.date == LocalDate.now(ZoneId.systemDefault())) {
+                val zone = ZoneId.systemDefault()
+                val today = LocalDate.now(zone)
+                // An edit that was already open when midnight passed is still saved to its own day
+                // for a short grace period, so text typed around midnight is not lost.
+                val justAfterMidnight = entry.date == today.minusDays(1) &&
+                    System.currentTimeMillis() - today.atStartOfDay(zone).toInstant().toEpochMilli() <
+                    MIDNIGHT_GRACE_MS
+                require(entry.date == today || justAfterMidnight) {
                     "Only the current local date can be edited."
                 }
                 require(entry.description.length <= MAX_DESCRIPTION_LENGTH) {
                     "The daily description exceeds the 5,000-character limit."
                 }
+                // Never stamp a record older than its previous version, even if the phone clock
+                // was moved backwards: otherwise the older copy could win the next sync.
+                val previousStamp = database.writableDatabase.rawQuery(
+                    "SELECT $COLUMN_UPDATED_AT FROM $TABLE_DAILY_ENTRIES WHERE $COLUMN_LOCAL_DATE = ?",
+                    arrayOf(entry.date.toString())
+                ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
                 val values = ContentValues().apply {
                     put(COLUMN_LOCAL_DATE, entry.date.toString())
                     put(COLUMN_COMPLETED, if (entry.completed) 1 else 0)
                     put(COLUMN_DESCRIPTION, entry.description)
-                    put(COLUMN_UPDATED_AT, System.currentTimeMillis())
-                    put(COLUMN_TIME_ZONE, ZoneId.systemDefault().id)
+                    put(COLUMN_UPDATED_AT, maxOf(System.currentTimeMillis(), previousStamp + 1L))
+                    put(COLUMN_TIME_ZONE, zone.id)
                 }
                 val inserted = database.writableDatabase.insertWithOnConflict(
                     TABLE_DAILY_ENTRIES,
@@ -158,6 +202,12 @@ internal class DailyEntryRepository(context: Context) {
         accountId: String,
         onResult: (Result<Int>) -> Unit
     ) {
+        // Only one sync runs at a time. A request that arrives meanwhile is remembered and runs once
+        // more afterwards, so a burst of saves never queues up a pile of full downloads.
+        if (!syncRunning.compareAndSet(false, true)) {
+            syncRerun.set(true)
+            return
+        }
         // Network requests run on a separate queue so a slow connection cannot block
         // local entry reads or saves on the database executor.
         syncExecutor.execute {
@@ -222,6 +272,78 @@ internal class DailyEntryRepository(context: Context) {
 
                 mergedEntries.size
             }
+            syncRunning.set(false)
+            mainHandler.post {
+                onResult(result)
+                // The flag is cleared even when the run failed, so a failure does not retry in a loop.
+                if (syncRerun.getAndSet(false) && result.isSuccess) {
+                    syncCloud(cloud, accountId, onResult)
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Date notes: short plans or reminders attached to any calendar date. They live only on this
+    // device (there is no cloud table for them), and are never touched by the daily-history sync.
+    // ---------------------------------------------------------------------------------------------
+
+    /** Notes for every date from [from] to [to], inclusive. */
+    fun loadNotes(
+        from: LocalDate,
+        to: LocalDate,
+        onResult: (Result<Map<LocalDate, String>>) -> Unit
+    ) {
+        executor.execute {
+            val result = runCatching {
+                val cursor = database.readableDatabase.query(
+                    TABLE_DATE_NOTES,
+                    arrayOf(COLUMN_LOCAL_DATE, COLUMN_NOTE),
+                    "$COLUMN_LOCAL_DATE BETWEEN ? AND ?",
+                    arrayOf(from.toString(), to.toString()),
+                    null,
+                    null,
+                    null
+                )
+                cursor.use {
+                    val notes = HashMap<LocalDate, String>()
+                    while (it.moveToNext()) {
+                        notes[LocalDate.parse(it.getString(0))] = it.getString(1).orEmpty()
+                    }
+                    notes as Map<LocalDate, String>
+                }
+            }
+            mainHandler.post { onResult(result) }
+        }
+    }
+
+    /** Saves the note for [date]. Blank text removes the note. */
+    fun saveNote(date: LocalDate, text: String, onResult: (Result<Unit>) -> Unit) {
+        executor.execute {
+            val result = runCatching {
+                val trimmed = text.trim()
+                require(trimmed.length <= MAX_NOTE_LENGTH) {
+                    "A note can be at most $MAX_NOTE_LENGTH characters."
+                }
+                val writable = database.writableDatabase
+                if (trimmed.isEmpty()) {
+                    writable.delete(TABLE_DATE_NOTES, "$COLUMN_LOCAL_DATE = ?", arrayOf(date.toString()))
+                } else {
+                    val values = ContentValues().apply {
+                        put(COLUMN_LOCAL_DATE, date.toString())
+                        put(COLUMN_NOTE, trimmed)
+                        put(COLUMN_UPDATED_AT, System.currentTimeMillis())
+                    }
+                    val rowId = writable.insertWithOnConflict(
+                        TABLE_DATE_NOTES,
+                        null,
+                        values,
+                        SQLiteDatabase.CONFLICT_REPLACE
+                    )
+                    check(rowId != -1L) { "The note could not be saved." }
+                }
+                Unit
+            }
             mainHandler.post { onResult(result) }
         }
     }
@@ -283,20 +405,38 @@ internal class DailyEntryRepository(context: Context) {
                 )
                 """.trimIndent()
             )
+            createNotesTable(db)
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            // Add versioned migrations before changing this schema.
-            // Never drop user records as an upgrade fallback.
+            // Versioned migrations only add to the schema. Never drop user records as a fallback.
+            if (oldVersion < 2) createNotesTable(db)
+        }
+
+        private fun createNotesTable(db: SQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS $TABLE_DATE_NOTES (
+                    $COLUMN_LOCAL_DATE TEXT NOT NULL PRIMARY KEY,
+                    $COLUMN_NOTE TEXT NOT NULL,
+                    $COLUMN_UPDATED_AT INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
         }
     }
 
     private companion object {
         const val MAX_DESCRIPTION_LENGTH = 5_000
+        const val MAX_NOTE_LENGTH = 500
         const val SAVE_DEBOUNCE_MS = 500L
+        const val SYNC_DELAY_MS = 6_000L
+        const val MIDNIGHT_GRACE_MS = 10 * 60_000L
         const val DATABASE_NAME = "dailytracker.db"
-        const val DATABASE_VERSION = 1
+        const val DATABASE_VERSION = 2
         const val TABLE_DAILY_ENTRIES = "daily_entries"
+        const val TABLE_DATE_NOTES = "date_notes"
+        const val COLUMN_NOTE = "note"
         const val COLUMN_LOCAL_DATE = "local_date"
         const val COLUMN_COMPLETED = "completed"
         const val COLUMN_DESCRIPTION = "description"

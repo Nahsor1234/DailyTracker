@@ -1,8 +1,14 @@
 package com.nahsor1234.dailytracker
 
 import android.os.Bundle
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
+import androidx.core.content.ContextCompat
+import androidx.compose.material3.AlertDialog
+import kotlinx.coroutines.delay
 import android.os.Handler
 import android.os.Looper
 import androidx.activity.ComponentActivity
@@ -75,6 +81,32 @@ import androidx.compose.material3.TextButton
 
 private enum class TrackerDestination { PROGRESS, TIMER }
 
+internal enum class SyncPhase { SIGNED_OUT, SYNCING, SYNCED, OFFLINE, ERROR }
+
+/** Turns a raw failure into a sentence a person can act on. */
+internal fun friendlySyncError(error: Throwable): String {
+    val raw = error.message.orEmpty()
+    return when {
+        raw.contains("another account", ignoreCase = true) ||
+            raw.contains("different account", ignoreCase = true) ->
+            "This device's history belongs to a different account, so nothing was synced."
+        raw.isBlank() -> "Sync didn't work this time. Tap to try again."
+        else -> "Sync didn't work: $raw"
+    }
+}
+
+/** "Synced just now", "Synced 5 min ago", ... */
+internal fun syncAgeText(lastSyncedAt: Long, now: Long): String {
+    if (lastSyncedAt <= 0L) return "Synced"
+    val minutes = ((now - lastSyncedAt) / 60_000L).coerceAtLeast(0L)
+    return when {
+        minutes < 1L -> "Synced just now"
+        minutes < 60L -> "Synced $minutes min ago"
+        minutes < 24L * 60L -> "Synced ${minutes / 60L} h ago"
+        else -> "Synced ${minutes / (24L * 60L)} d ago"
+    }
+}
+
 class MainActivity : ComponentActivity() {
     private var today by mutableStateOf(LocalDate.now(ZoneId.systemDefault()))
     private var authCallbackUri by mutableStateOf<Uri?>(null)
@@ -85,9 +117,37 @@ class MainActivity : ComponentActivity() {
         DailyTrackerCloud(applicationContext)
     }
 
+    // Bumped every time the app comes to the foreground, so the UI can retry a sync that failed
+    // while the phone was offline.
+    private var startCount by mutableIntStateOf(0)
+
+    // Keeps "today" correct while the app stays open across midnight or after a clock/time-zone
+    // change. Without it the screen kept showing yesterday's editor until the app was reopened.
+    private val dateChangeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            today = LocalDate.now(ZoneId.systemDefault())
+        }
+    }
+    private var dateReceiverRegistered = false
+
     override fun onStart() {
         super.onStart()
         TimerAlertState.appInForeground = true
+        startCount += 1
+        runCatching {
+            ContextCompat.registerReceiver(
+                this,
+                dateChangeReceiver,
+                IntentFilter().apply {
+                    addAction(Intent.ACTION_DATE_CHANGED)
+                    addAction(Intent.ACTION_TIME_CHANGED)
+                    addAction(Intent.ACTION_TIMEZONE_CHANGED)
+                },
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            dateReceiverRegistered = true
+        }
+        today = LocalDate.now(ZoneId.systemDefault())
         // Opening the app silences whatever is ringing; the notification's own buttons do the same.
         runCatching {
             AlarmRinging.stop(this)
@@ -99,7 +159,18 @@ class MainActivity : ComponentActivity() {
         TimerAlertState.appInForeground = false
         TimerAlarmPlayer.stop(this)
         repository.flushPendingSave()
+        repository.flushQueuedSync()
+        if (dateReceiverRegistered) {
+            runCatching { unregisterReceiver(dateChangeReceiver) }
+            dateReceiverRegistered = false
+        }
         super.onStop()
+    }
+
+    /** A sign-in link is used once: forget it here so rotating the phone cannot replay it. */
+    private fun consumeAuthLink() {
+        authCallbackUri = null
+        setIntent(Intent(intent).apply { data = null })
     }
 
     override fun onResume() {
@@ -123,15 +194,18 @@ class MainActivity : ComponentActivity() {
         // Re-arming alarms reads stored reminders from disk: keep that off the first frame.
         val appContext = applicationContext
         Thread({ runCatching { ReminderScheduler.rescheduleAll(appContext) } }, "dailytracker-reminders").start()
-        authCallbackUri = intent?.data
+        // Only a fresh launch reads the link. After a rotation or process restart the same intent
+        // is delivered again, and the link (already used) must not be processed a second time.
+        if (savedInstanceState == null) authCallbackUri = intent?.data
         setContent {
             DailyTrackerTheme {
                 DailyTrackerApp(
                     repository = repository,
                     today = today,
                     cloud = cloud,
+                    startCount = startCount,
                     pendingAuthUri = authCallbackUri,
-                    onAuthUriHandled = { authCallbackUri = null }
+                    onAuthUriHandled = ::consumeAuthLink
                 )
             }
         }
@@ -149,9 +223,11 @@ private fun DailyTrackerApp(
     repository: DailyEntryRepository,
     today: LocalDate,
     cloud: DailyTrackerCloud,
+    startCount: Int,
     pendingAuthUri: Uri?,
     onAuthUriHandled: () -> Unit
 ) {
+    val appContext = LocalContext.current.applicationContext
     var destination by rememberSaveable { mutableStateOf(TrackerDestination.PROGRESS) }
     val stateHolder = rememberSaveableStateHolder()
     val colors = MaterialTheme.colorScheme
@@ -162,8 +238,12 @@ private fun DailyTrackerApp(
     var showAccount by rememberSaveable { mutableStateOf(false) }
     var cloudAccountId by remember { mutableStateOf<String?>(null) }
     var cloudSyncStatus by rememberSaveable { mutableStateOf("") }
+    var syncPhase by rememberSaveable { mutableStateOf(SyncPhase.SIGNED_OUT) }
+    var lastSyncedAt by rememberSaveable { mutableLongStateOf(0L) }
+    var clockNow by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var cloudDataRevision by remember { mutableIntStateOf(0) }
-    var syncInProgress by remember { mutableStateOf(false) }
+    var pendingLink by remember { mutableStateOf<DailyTrackerCloud.PendingAuthLink?>(null) }
+    var showSetup by rememberSaveable { mutableStateOf(!SetupPrefs.isDone(appContext)) }
     var passwordRecoveryPending by rememberSaveable { mutableStateOf(false) }
     val syncWorker = remember(cloud) {
         Executors.newSingleThreadExecutor { task ->
@@ -176,51 +256,81 @@ private fun DailyTrackerApp(
     fun handleCloudSyncResult(result: Result<Int>) {
         result.onSuccess {
             cloudDataRevision += 1
-            cloudSyncStatus = "Synced " + it + " daily records."
-        }.onFailure {
-            cloudAccountId = null
-            cloudSyncStatus = "Sync failed: " + (it.message ?: "Unknown error.")
+            lastSyncedAt = System.currentTimeMillis()
+            syncPhase = SyncPhase.SYNCED
+            cloudSyncStatus = "Your history is up to date."
+        }.onFailure { error ->
+            when (error) {
+                // The sign-in itself is no longer valid: this is the only case that signs out.
+                is DailyTrackerCloud.CloudAuthException -> {
+                    cloudAccountId = null
+                    syncPhase = SyncPhase.SIGNED_OUT
+                    cloudSyncStatus = error.message ?: "Please sign in again."
+                }
+                // Offline or server busy: stay signed in and try again later.
+                is DailyTrackerCloud.CloudTransientException -> {
+                    syncPhase = SyncPhase.OFFLINE
+                    cloudSyncStatus = error.message ?: "No connection."
+                }
+                else -> {
+                    syncPhase = SyncPhase.ERROR
+                    cloudSyncStatus = friendlySyncError(error)
+                }
+            }
         }
     }
 
     fun startCloudSync(account: DailyTrackerCloud.Account) {
         if (!account.verified) {
             cloudAccountId = null
+            syncPhase = SyncPhase.SIGNED_OUT
             cloudSyncStatus = "Verify your email before cloud sync can start."
             return
         }
         cloudAccountId = account.id
-        if (syncInProgress) return
-        syncInProgress = true
-        cloudSyncStatus = "Syncing daily history..."
-        repository.syncCloud(cloud, account.id) { result ->
-            syncInProgress = false
-            handleCloudSyncResult(result)
-        }
+        syncPhase = SyncPhase.SYNCING
+        cloudSyncStatus = "Syncing your history..."
+        repository.syncCloud(cloud, account.id, ::handleCloudSyncResult)
+    }
+
+    fun retrySync() {
+        val id = cloudAccountId ?: return
+        syncPhase = SyncPhase.SYNCING
+        repository.syncCloud(cloud, id, ::handleCloudSyncResult)
     }
 
     DisposableEffect(syncWorker) {
         onDispose { syncWorker.shutdownNow() }
     }
 
+    // Keeps "Synced 2 min ago" fresh.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(30_000)
+            clockNow = System.currentTimeMillis()
+        }
+    }
+
+    // Coming back to the app after being offline: try again once.
+    LaunchedEffect(startCount) {
+        clockNow = System.currentTimeMillis()
+        if (startCount > 1 && cloudAccountId != null &&
+            (syncPhase == SyncPhase.OFFLINE || syncPhase == SyncPhase.ERROR)
+        ) retrySync()
+    }
+
+    // A link is only read here. Nothing changes until the user confirms it in the dialog below.
     LaunchedEffect(pendingAuthUri) {
         val callbackUri = pendingAuthUri ?: return@LaunchedEffect
         syncWorker.execute {
-            val result = runCatching { cloud.acceptAuthCallback(callbackUri) }
+            val result = runCatching { cloud.parseAuthCallback(callbackUri) }
             mainHandler.post {
-                result.onSuccess { callback ->
-                    showAccount = true
-                    if (callback.type == "recovery") {
-                        passwordRecoveryPending = true
-                        cloudSyncStatus = "Choose a new password to finish account recovery."
-                    } else {
-                        passwordRecoveryPending = false
-                        startCloudSync(callback.account)
+                result.onSuccess { pendingLink = it }
+                    .onFailure {
+                        showAccount = true
+                        syncPhase = SyncPhase.ERROR
+                        cloudSyncStatus = "Authentication link failed: " + (it.message ?: "Invalid link.")
                     }
-                }.onFailure {
-                    showAccount = true
-                    cloudSyncStatus = "Authentication link failed: " + (it.message ?: "Invalid link.")
-                }
                 onAuthUriHandled()
             }
         }
@@ -230,8 +340,8 @@ private fun DailyTrackerApp(
         syncWorker.execute {
             val result = runCatching { cloud.currentAccount() }
             mainHandler.post {
-                result.onSuccess {
-                    account -> if (account != null && !passwordRecoveryPending) startCloudSync(account)
+                result.onSuccess { account ->
+                    if (account != null && !passwordRecoveryPending) startCloudSync(account)
                 }
                 result.onFailure {
                     cloudSyncStatus = it.message ?: "Could not restore the cloud session."
@@ -239,6 +349,59 @@ private fun DailyTrackerApp(
             }
         }
     }
+
+    pendingLink?.let { link ->
+        val replacing = cloudAccountId != null
+        AlertDialog(
+            onDismissRequest = { pendingLink = null },
+            title = {
+                Text(
+                    when (link.type) {
+                        "recovery" -> "Reset your password?"
+                        else -> "Sign in with this link?"
+                    }
+                )
+            },
+            text = {
+                Text(
+                    buildString {
+                        append("This link is for ")
+                        append(link.email.ifBlank { "an account" })
+                        append(". Only continue if you asked for it from DailyTracker.")
+                        if (replacing) append(" You are already signed in; continuing switches accounts.")
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val accepted = link
+                    pendingLink = null
+                    syncPhase = SyncPhase.SYNCING
+                    syncWorker.execute {
+                        val result = runCatching { cloud.completeAuthCallback(accepted) }
+                        mainHandler.post {
+                            showAccount = true
+                            result.onSuccess { callback ->
+                                if (callback.type == "recovery") {
+                                    passwordRecoveryPending = true
+                                    syncPhase = SyncPhase.SIGNED_OUT
+                                    cloudSyncStatus = "Choose a new password to finish account recovery."
+                                } else {
+                                    passwordRecoveryPending = false
+                                    startCloudSync(callback.account)
+                                }
+                            }.onFailure {
+                                syncPhase = SyncPhase.ERROR
+                                cloudSyncStatus = "Authentication link failed: " + (it.message ?: "Invalid link.")
+                            }
+                        }
+                    }
+                }) { Text("Continue") }
+            },
+            dismissButton = { TextButton(onClick = { pendingLink = null }) { Text("Cancel") } }
+        )
+    }
+
     BackHandler(enabled = showReminders || showAccount) {
         if (showReminders) showReminders = false else showAccount = false
     }
@@ -308,7 +471,9 @@ private fun DailyTrackerApp(
                             cloud = cloud,
                             cloudAccountId = cloudAccountId,
                             cloudDataRevision = cloudDataRevision,
-                            onCloudSyncResult = ::handleCloudSyncResult
+                            onCloudSyncResult = { result ->
+                                handleCloudSyncResult(result)
+                            }
                         )
                     }
                 }
@@ -351,6 +516,20 @@ private fun DailyTrackerApp(
                 modifier = Modifier.align(Alignment.BottomCenter)
                     .navigationBarsPadding().padding(bottom = 10.dp)
             )
+            if (syncPhase != SyncPhase.SIGNED_OUT) {
+                SyncStatusPill(
+                    phase = syncPhase,
+                    lastSyncedAt = lastSyncedAt,
+                    now = clockNow,
+                    onClick = {
+                        focusManager.clearFocus()
+                        if (syncPhase == SyncPhase.OFFLINE || syncPhase == SyncPhase.ERROR) retrySync()
+                        else showAccount = true
+                    },
+                    modifier = Modifier.align(Alignment.TopStart).statusBarsPadding()
+                        .padding(top = 12.dp, start = 20.dp)
+                )
+            }
             Row(
                 Modifier.align(Alignment.TopEnd).statusBarsPadding()
                     .padding(top = 12.dp, end = 16.dp),
@@ -389,6 +568,7 @@ private fun DailyTrackerApp(
                 },
                 onSignedOut = {
                     cloudAccountId = null
+                    syncPhase = SyncPhase.SIGNED_OUT
                     passwordRecoveryPending = false
                     cloudSyncStatus = "Signed out. Local history remains on this device."
                 },
@@ -404,6 +584,17 @@ private fun DailyTrackerApp(
                 fadeOut(tween(180))
         ) {
             ReminderScreen(onBack = { showReminders = false })
+        }
+
+        AnimatedVisibility(
+            visible = showSetup,
+            enter = fadeIn(tween(220)),
+            exit = fadeOut(tween(200))
+        ) {
+            FirstRunSetupScreen(onFinished = {
+                SetupPrefs.markDone(appContext)
+                showSetup = false
+            })
         }
 
         // Shown while the countdown alert is ringing, whichever screen is open.
@@ -674,5 +865,45 @@ private fun NavigationGlyph(destination: TrackerDestination, tint: Color, modifi
                 androidx.compose.ui.geometry.Offset(center.x + size.width * 0.18f, center.y + size.height * 0.10f),
                 stroke.width, cap = StrokeCap.Round)
         }
+    }
+}
+@Composable
+private fun SyncStatusPill(
+    phase: SyncPhase,
+    lastSyncedAt: Long,
+    now: Long,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val scheme = MaterialTheme.colorScheme
+    val source = rememberPressSource()
+    val pulse by rememberInfiniteTransition(label = "sync-pulse").animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(650), RepeatMode.Reverse),
+        label = "sync-pulse-value"
+    )
+    val (label, dot) = when (phase) {
+        SyncPhase.SYNCING -> "Syncing\u2026" to scheme.primary
+        SyncPhase.SYNCED -> syncAgeText(lastSyncedAt, now) to scheme.primary
+        SyncPhase.OFFLINE -> "Offline \u00b7 tap to retry" to scheme.onSurfaceVariant
+        SyncPhase.ERROR -> "Sync failed \u00b7 tap to retry" to scheme.error
+        SyncPhase.SIGNED_OUT -> "" to scheme.onSurfaceVariant
+    }
+    Row(
+        modifier.height(44.dp).pressScale(source).clip(CircleShape)
+            .background(Color.White.copy(alpha = 0.045f))
+            .border(1.dp, Color.White.copy(alpha = 0.09f), CircleShape)
+            .hapticClickable(source, onClick = onClick)
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier.size(8.dp)
+                .graphicsLayer { alpha = if (phase == SyncPhase.SYNCING) pulse else 1f }
+                .clip(CircleShape).background(dot)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(label, color = scheme.onSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.Medium)
     }
 }
