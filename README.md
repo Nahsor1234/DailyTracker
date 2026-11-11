@@ -26,6 +26,8 @@ Daily Progress, Timer, Reminders, and the first Supabase account/sync workflows 
 
 The first account used on an installation is associated with that installation's local history. Signing into a different account does not upload those records to the new account. Signing out does not delete local or cloud records.
 
+The app talks to the Supabase project `tbrnzealznagqednxdem`. The schema is in `supabase/migrations/`; it creates `daily_progress` with row-level security so each user only sees their own rows.
+
 Email verification and password recovery use the Android callback URI shown below. Add this exact URI to Supabase Dashboard → Authentication → URL Configuration → Additional Redirect URLs:
 
 com.nahsor1234.dailytracker://auth/callback

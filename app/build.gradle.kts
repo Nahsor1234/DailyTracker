@@ -15,8 +15,8 @@ android {
         versionCode = 7
         versionName = "1.6"
 
-        buildConfigField("String", "SUPABASE_URL", "\"https://clirtdxtqtiatuqkitmy.supabase.co\"")
-        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"sb_publishable_VjQYGoJjFoAQXHSGwOohtQ_XL1XWIjU\"")
+        buildConfigField("String", "SUPABASE_URL", "\"https://tbrnzealznagqednxdem.supabase.co\"")
+        buildConfigField("String", "SUPABASE_PUBLISHABLE_KEY", "\"sb_publishable_o1N52cNJa6Vb6Hts6tOX_Q_JHdOghbK\"")
     }
 
     buildTypes {
